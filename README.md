@@ -1,6 +1,6 @@
-# FrachtImperium Helper
+# Frimp Führer
 
-Ein Tampermonkey-Userscript für das Browsergame [FrachtImperium](https://frachtimperium.de) (Speditions-Wirtschaftssimulator).
+Ein Tampermonkey-Userscript für [frachtimperium.de](https://frachtimperium.de) (Speditions-Wirtschaftssimulator).
 
 Baut auf `/game/active_tours.php` ein eigenständiges "Cockpit"-Dashboard, das:
 
@@ -13,7 +13,7 @@ Baut auf `/game/active_tours.php` ein eigenständiges "Cockpit"-Dashboard, das:
 ## Installation
 
 1. [Tampermonkey](https://www.tampermonkey.net/) installieren (Chrome/Firefox/Edge)
-2. [frachtimperium-helper.user.js](https://raw.githubusercontent.com/Ob3s/frimp_fuehrer/main/frachtimperium-helper.user.js) öffnen – Tampermonkey bietet die Installation automatisch an
+2. [frimp_fuehrer.user.js](https://raw.githubusercontent.com/Ob3s/frimp_fuehrer/main/frimp_fuehrer.user.js) öffnen – Tampermonkey bietet die Installation automatisch an
 3. Danach installiert Tampermonkey Updates automatisch, sobald hier eine neue Version gepusht wird (`@updateURL`/`@downloadURL`)
 
 ## Hinweise
@@ -28,7 +28,7 @@ Baut auf `/game/active_tours.php` ein eigenständiges "Cockpit"-Dashboard, das:
 Tampermonkey erkennt ein verfügbares Update nur über eine geänderte `@version`
 im Script-Header. Ein `pre-commit`-Hook (`.githooks/pre-commit`) erhöht die
 Patch-Version deshalb automatisch bei jedem Commit, der
-`frachtimperium-helper.user.js` verändert. Für einen bewussten Minor-/Major-
+`frimp_fuehrer.user.js` verändert. Für einen bewussten Minor-/Major-
 Sprung (z.B. `0.29.0` → `0.30.0`) einfach die `@version`-Zeile selbst im
 Commit anpassen – der Hook erkennt das und bumpt dann nicht zusätzlich.
 

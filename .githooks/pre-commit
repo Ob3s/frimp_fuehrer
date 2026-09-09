@@ -1,6 +1,6 @@
 #!/bin/sh
 # Zählt automatisch die @version-Patch-Nummer im Userscript-Header hoch,
-# sobald frachtimperium-helper.user.js Teil eines Commits ist. Tampermonkey
+# sobald frimp_fuehrer.user.js Teil eines Commits ist. Tampermonkey
 # erkennt Updates nur über @version - ohne Bump würde @updateURL nie ein
 # neues Update anbieten, egal wie oft wir pushen.
 #
@@ -8,7 +8,7 @@
 # einen bewussten Minor-/Major-Sprung), lässt der Hook sie in Ruhe - er bumpt
 # nur den Patch-Teil, wenn die Zeile gegenüber HEAD unverändert ist.
 set -e
-FILE="frachtimperium-helper.user.js"
+FILE="frimp_fuehrer.user.js"
 
 if ! git diff --cached --name-only | grep -qx "$FILE"; then
   exit 0

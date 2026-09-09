@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         Frimp Führer
-// @namespace    noone.frachtimperium
-// @version      0.29.6
+// @namespace    noone.frimpfuehrer
+// @version      0.29.7
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
 // @grant        none
 // @run-at       document-idle
-// @updateURL    https://raw.githubusercontent.com/Ob3s/frimp_fuehrer/main/frachtimperium-helper.user.js
-// @downloadURL  https://raw.githubusercontent.com/Ob3s/frimp_fuehrer/main/frachtimperium-helper.user.js
+// @updateURL    https://raw.githubusercontent.com/Ob3s/frimp_fuehrer/main/frimp_fuehrer.user.js
+// @downloadURL  https://raw.githubusercontent.com/Ob3s/frimp_fuehrer/main/frimp_fuehrer.user.js
 // ==/UserScript==
 
 (function () {
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.6';
+  const SCRIPT_VERSION = '0.29.7';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
