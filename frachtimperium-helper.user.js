@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FrachtImperium Helper
 // @namespace    noone.frachtimperium
-// @version      0.29.4
+// @version      0.29.5
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -34,6 +34,7 @@
     vehicleFreeAtText: '.return-append-preview',            // "Fahrzeug frei am DATUM · von ORT"
     driverLiveContainer: '#driverLiveStatus',               // data-vehicle-id Attribut
     driverLiveValues: '[data-driver-live-values]',
+    driverLiveValue: '.driver-live-value',                  // ein Span je Fahrer, Klasse .is-driving falls er gerade fährt
     phaseBlocks: '.phase-block',                            // Klassen: phase-loaded-drive / phase-empty-drive / phase-loading / phase-unloading / phase-pause / phase-shift-break
     phaseDetailGrid: '.phase-detail-grid',                  // Key-Value-Paare: Zeit/Auftrag/Route/Status/Phase
     dayRow: '.day-row',
@@ -244,7 +245,44 @@
       freiAbOrt: freiMatch ? freiMatch[2].trim() : null,
       freiAbZeit: freiMatch ? parseDeDateTime(freiMatch[1]) : null,
       phasen: parsePhaseBlocks(root),
+      live: parseLiveDriverStatusAusDispatchSeite(root),
     };
+  }
+
+  /**
+   * Parst die "LIVE · Restfahrzeit / Rest-Schichtzeit"-Karte direkt aus der
+   * bereits geladenen dispatch.php-Seite, statt extra driver_time_status.php
+   * abzufragen (siehe Chat: dispatch.php enthält dieselben Werte bereits als
+   * fertig formatierten Text HH:MM:SS - ein Fetch weniger pro Fahrzeug).
+   * Liefert dieselbe Form wie fetchLiveDriverStatus() ({ok, drivers}), damit
+   * beide überall austauschbar sind. null falls die Karte fehlt (z.B. bei
+   * einem Fahrzeug ohne live zuweisbare Werte) - Aufrufer fallen dann auf
+   * fetchLiveDriverStatus() zurück.
+   * @returns {{ok: true, drivers: Object[]}|null}
+   */
+  function parseLiveDriverStatusAusDispatchSeite(root = document) {
+    const karte = root.querySelector(SELECTORS.driverLiveContainer);
+    if (!karte) return null;
+    const spans = Array.from(karte.querySelectorAll(SELECTORS.driverLiveValue));
+    if (!spans.length) return null;
+
+    const drivers = spans.map((el, i) => {
+      const strongText = el.querySelector('strong')?.textContent.trim() || '';
+      const spanText = el.querySelector('span')?.textContent.trim() || '';
+      // "Fahrer 1 · Max Schneider" oder "Fahrer 2 · Omar Nowak · fährt aktuell"
+      const nameMatch = /Fahrer\s+(\d+)\s*·\s*([^·]+)/.exec(strongText);
+      // "Fahrt 01:49:51 · Schicht 01:04:51"
+      const zeitMatch = /Fahrt\s+(\d+):(\d+):(\d+)\s*·\s*Schicht\s+(\d+):(\d+):(\d+)/.exec(spanText);
+      return {
+        slot: nameMatch ? parseInt(nameMatch[1], 10) : i + 1,
+        name: nameMatch ? nameMatch[2].trim() : strongText,
+        is_driving_now: el.classList.contains('is-driving'),
+        remaining_drive_seconds: zeitMatch ? (+zeitMatch[1] * 3600 + +zeitMatch[2] * 60 + +zeitMatch[3]) : null,
+        remaining_shift_seconds: zeitMatch ? (+zeitMatch[4] * 3600 + +zeitMatch[5] * 60 + +zeitMatch[6]) : null,
+      };
+    });
+
+    return { ok: true, drivers };
   }
 
   /** @returns {Phase[]} */
@@ -2121,7 +2159,7 @@
       }
 
       for (const entry of fleet) {
-        const live = entry.status?.vehicleId ? await fetchLiveDriverStatus(entry.status.vehicleId, entry.name) : null;
+        const live = entry.status?.live ?? (entry.status?.vehicleId ? await fetchLiveDriverStatus(entry.status.vehicleId, entry.name) : null);
         const vehicleId = entry.status?.vehicleId;
         const titel = vehicleId
           ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;">🚐 ${entry.name}</a>`
@@ -2259,7 +2297,10 @@
         const kategorieLabel = options.find(o => o.value === bodyType)?.label ?? bodyType;
 
         const [fleetMitLive, detailsMap] = await Promise.all([
-          Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null }))),
+          Promise.all(fleetRoh.map(async f => ({
+            ...f,
+            live: f.status?.live ?? (f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null),
+          }))),
           fetchFuhrparkDetails(),
         ]);
         const fleet = fleetMitLive.map(f => {
