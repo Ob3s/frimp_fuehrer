@@ -31,7 +31,10 @@ MINOR=$(echo "$CURRENT_VERSION" | cut -d. -f2)
 PATCH=$(echo "$CURRENT_VERSION" | cut -d. -f3)
 NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
 
-sed -i "s/\(@version[[:space:]]*\)$CURRENT_VERSION/\1$NEW_VERSION/" "$FILE"
+sed -i \
+  -e "s/\(@version[[:space:]]*\)$CURRENT_VERSION/\1$NEW_VERSION/" \
+  -e "s/\(SCRIPT_VERSION = '\)$CURRENT_VERSION\('\)/\1$NEW_VERSION\2/" \
+  "$FILE"
 git add "$FILE"
 
 echo "[pre-commit] $FILE: Version $CURRENT_VERSION -> $NEW_VERSION"

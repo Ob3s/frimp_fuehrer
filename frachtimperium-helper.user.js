@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         FrachtImperium Helper
+// @name         Frimp Führer
 // @namespace    noone.frachtimperium
-// @version      0.29.5
+// @version      0.29.6
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -13,6 +13,12 @@
 
 (function () {
   'use strict';
+
+  // Manuell synchron zu @version oben zu halten - der pre-commit-Hook
+  // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
+  // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
+  // Tampermonkey wirklich die neueste Version geladen hat.
+  const SCRIPT_VERSION = '0.29.6';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2071,7 +2077,7 @@
     const dashboard = document.createElement('div');
     dashboard.id = 'fi-dashboard';
     dashboard.innerHTML = `
-      <h2>🚚 FrachtImperium Cockpit</h2>
+      <h2>🚚 Frimp Führer <span style="font-size:12px; font-weight:700; color:#9aa5b8;">v${SCRIPT_VERSION}</span></h2>
       <div id="fi-dash-header" class="fi-dash-pills"><div class="fi-dash-pill">Lade …</div></div>
 
       <h3>Tourenplan – alle Fahrzeuge auf einen Blick</h3>
