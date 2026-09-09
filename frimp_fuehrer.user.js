@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.9
+// @version      0.29.10
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.9';
+  const SCRIPT_VERSION = '0.29.10';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -180,6 +180,12 @@
       text.replace(/[^\d,-]/g, '').replace(/\./g, '').replace(',', '.')
     );
     return { text, wert: zahl, negativ };
+  }
+
+  /** Aktueller Standort der Firma (Berlin o.ä.) - Ziel für "Zurück zur Firma". */
+  function parseFirmenstandort() {
+    const el = document.querySelector(SELECTORS.standort);
+    return el ? el.textContent.trim() : null;
   }
 
   function parseStatBadges() {
@@ -1849,13 +1855,6 @@
       .fi-dash-phase-block.phase-laden, .fi-dash-phase-block.phase-entladen { background: #d4a94a; }
       .fi-dash-phase-block.phase-fahrt_beladen { background: #4caf7d; }
       .fi-dash-phase-block.phase-pause, .fi-dash-phase-block.phase-schichtpause { background: #c1554a; }
-      .fi-dash-timeline-now {
-        position: absolute;
-        top: 0; bottom: 0;
-        width: 2px;
-        background: #ff5566;
-        z-index: 2;
-      }
       .fi-dash-timeline-gridline {
         position: absolute;
         top: 0; bottom: 0;
@@ -1978,11 +1977,6 @@
     baueZeitAchsenTicks(fensterStartMs, fensterEndeMs).forEach(tick => {
       html += `<div class="fi-dash-timeline-gridline${tick.istMitternacht ? ' is-day' : ''}" style="left:${tick.pct.toFixed(2)}%"></div>`;
     });
-
-    const jetztPct = ((Date.now() - fensterStartMs) / fensterDauerMs) * 100;
-    if (jetztPct >= 0 && jetztPct <= 100) {
-      html += `<div class="fi-dash-timeline-now" style="left:${jetztPct.toFixed(2)}%" data-fi-tip="Jetzt: ${new Date().toLocaleString('de-DE')}"></div>`;
-    }
 
     (phasen || []).forEach(p => {
       if (!p.start || !p.ende) return;
@@ -2133,8 +2127,8 @@
           <select id="fi-dash-bodytype" class="fi-dash-select"></select>
         </div>
         <div class="fi-dash-field">
-          <label><input type="checkbox" id="fi-dash-only-return"> Nur Rückfracht nach</label>
-          <input type="text" id="fi-dash-return-city" value="Berlin" class="fi-dash-select" style="min-width:140px;">
+          <label><input type="checkbox" id="fi-dash-only-return"> Zurück zur Firma</label>
+          <select id="fi-dash-return-vehicle" class="fi-dash-select" style="min-width:160px; display:none;"></select>
         </div>
         <div class="fi-dash-field">
           <label>Umkreis (km)</label>
@@ -2176,10 +2170,16 @@
     await aktualisiereKopf();
 
     // --- Flotte (große Karten statt schmaler Sidebar-Zeilen) ---
+    // flotteFuerAuswahl: von aktualisiereFlotte() befüllt, damit die
+    // Fahrzeug-Auswahl bei "Zurück zur Firma" ohne zusätzlichen Fetch
+    // dieselben, schon geladenen Fahrzeugdaten nutzen kann (siehe Chat:
+    // Fetch-Anzahl niedrig halten).
+    let flotteFuerAuswahl = [];
     async function aktualisiereFlotte() {
       const fleetEl = document.getElementById('fi-dash-fleet');
       if (!fleetEl) return;
       const [fleet, fuhrparkDetails] = await Promise.all([fetchFleetStatus(), fetchFuhrparkDetails()]);
+      flotteFuerAuswahl = fleet;
 
       // Diagnose-Log (siehe Chat): zeigt in der Konsole (F12), ob der neue
       // Code wirklich läuft und wie viele Phasen pro Fahrzeug ankommen -
@@ -2289,8 +2289,30 @@
     const reloadBtn = document.getElementById('fi-dash-reload-btn');
     const resultsEl = document.getElementById('fi-dash-results');
     const onlyReturnCb = document.getElementById('fi-dash-only-return');
-    const returnCityInput = document.getElementById('fi-dash-return-city');
+    const returnVehicleSelect = document.getElementById('fi-dash-return-vehicle');
     const returnRadiusInput = document.getElementById('fi-dash-return-radius');
+
+    // Dropdown mit den schon geladenen Fahrzeugen befüllen (siehe
+    // flotteFuerAuswahl oben) - erst sichtbar, wenn der Haken gesetzt ist.
+    function befuelleReturnVehicleSelect() {
+      const vorherigeWahl = returnVehicleSelect.value;
+      returnVehicleSelect.innerHTML = '';
+      flotteFuerAuswahl.forEach(f => {
+        if (!f.status?.vehicleId) return;
+        const opt = document.createElement('option');
+        opt.value = f.status.vehicleId;
+        opt.textContent = f.name;
+        returnVehicleSelect.appendChild(opt);
+      });
+      if (vorherigeWahl && Array.from(returnVehicleSelect.options).some(o => o.value === vorherigeWahl)) {
+        returnVehicleSelect.value = vorherigeWahl;
+      }
+    }
+    befuelleReturnVehicleSelect();
+    onlyReturnCb.addEventListener('change', () => {
+      returnVehicleSelect.style.display = onlyReturnCb.checked ? '' : 'none';
+      if (onlyReturnCb.checked) befuelleReturnVehicleSelect();
+    });
 
     async function routenBerechnen(erzwingeNeuladen) {
       const bodyType = bodyTypeSelect.value;
@@ -2298,8 +2320,9 @@
         resultsEl.innerHTML = '<div class="fi-empty">Bitte zuerst eine Kategorie wählen.</div>';
         return;
       }
-      const rueckfrachtFilter = onlyReturnCb.checked && returnCityInput.value.trim()
-        ? { zielStadt: returnCityInput.value.trim(), zielRadiusKm: parseInt(returnRadiusInput.value, 10) || 0 }
+      const firmenStandort = onlyReturnCb.checked ? parseFirmenstandort() : null;
+      const rueckfrachtFilter = onlyReturnCb.checked && firmenStandort
+        ? { zielStadt: firmenStandort, zielRadiusKm: parseInt(returnRadiusInput.value, 10) || 0, nurVehicleId: returnVehicleSelect.value || null }
         : {};
 
       loadBtn.disabled = true;
@@ -2360,8 +2383,13 @@
         // finden. Die eigentliche Ziel-Filterung für Direkt-Routen und
         // Bündel passiert jetzt INNERHALB findeBesteRoutenProFahrzeug.
         const passende = filtereNachAufbau(angebote, kategorieLabel);
-        const kompatibleFleet = fleet.filter(f => f.typ === kategorieLabel);
+        const kompatibleFleetVollstaendig = fleet.filter(f => f.typ === kategorieLabel);
         const inkompatibleFleet = fleet.filter(f => f.typ !== kategorieLabel);
+        // "Zurück zur Firma" schränkt die Suche auf genau das gewählte
+        // Fahrzeug ein, statt wie sonst alle kompatiblen Fahrzeuge zu prüfen.
+        const kompatibleFleet = rueckfrachtFilter.nurVehicleId
+          ? kompatibleFleetVollstaendig.filter(f => String(f.status?.vehicleId) === String(rueckfrachtFilter.nurVehicleId))
+          : kompatibleFleetVollstaendig;
 
         let infoHtml = '';
         if (ausCache) {
@@ -2369,6 +2397,12 @@
           infoHtml += `<div class="fi-dash-row fi-muted">💾 Aus Cache (vor ${minutenAlt} Min. geladen)</div>`;
         }
         infoHtml += `<div class="fi-dash-row">${passende.length} passende Angebote · ${gescannteSeiten}${gesamtSeiten && gesamtSeiten > gescannteSeiten ? `/${gesamtSeiten}` : ''} Seiten à 100 gescannt</div>`;
+        if (onlyReturnCb.checked && !firmenStandort) {
+          infoHtml += `<div class="fi-dash-row fi-warn">⚠ Firmenstandort konnte nicht ermittelt werden - "Zurück zur Firma" wird ignoriert.</div>`;
+        }
+        if (rueckfrachtFilter.nurVehicleId && !kompatibleFleet.length && kompatibleFleetVollstaendig.length) {
+          infoHtml += `<div class="fi-dash-row fi-warn">⚠ Gewähltes Fahrzeug passt nicht zur Kategorie "${kategorieLabel}".</div>`;
+        }
         if (rueckfrachtFilter.zielStadt) {
           const zielTreffer = filtereNachZielstadt(passende, rueckfrachtFilter.zielStadt, rueckfrachtFilter.zielRadiusKm ?? 0).length;
           infoHtml += `<div class="fi-dash-row ${zielTreffer === 0 ? 'fi-warn' : 'fi-muted'}">🎯 davon ${zielTreffer} mit Ziel "${rueckfrachtFilter.zielStadt}"${rueckfrachtFilter.zielRadiusKm > 0 ? ` (±${rueckfrachtFilter.zielRadiusKm}km Umkreis)` : ' (exakt)'}</div>`;
