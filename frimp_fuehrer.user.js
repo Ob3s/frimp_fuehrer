@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.8
+// @version      0.29.9
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.8';
+  const SCRIPT_VERSION = '0.29.9';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -326,32 +326,6 @@
   }
 
   /**
-   * Liefert die Fahrzeugliste, egal auf welcher Seite wir gerade sind.
-   * Auf dispatch.php steht sie direkt im DOM, auf allen anderen Seiten
-   * (z.B. active_tours.php, das Premium-only ist und uns keine Details
-   * zeigt) holen wir uns dispatch.php einmal per fetch() nach.
-   * @returns {Promise<Vehicle[]>}
-   */
-  async function getVehicleListAnywhere() {
-    const onDispatchPage = /\/game\/dispatch\.php/.test(location.pathname);
-    if (onDispatchPage) {
-      return parseVehicleList();
-    }
-    try {
-      return await protokolliereAbruf('Fahrzeugliste (dispatch.php)', async () => {
-        const res = await fetch('/game/dispatch.php', { credentials: 'same-origin', cache: 'no-store' });
-        if (!res.ok) return [];
-        const html = await res.text();
-        const doc = safeParseHtml(html);
-        return parseVehicleList(doc);
-      });
-    } catch (e) {
-      console.warn('[FI-Helper] Fahrzeugliste konnte nicht geladen werden', e);
-      return [];
-    }
-  }
-
-  /**
    * Lädt die Dispositionsseite eines anderen Fahrzeugs per fetch() nach
    * und parst sie wie die aktuelle Seite. So bekommen wir eine
    * Flottenübersicht, ohne dass es eine eigene Übersichtsseite gibt
@@ -370,7 +344,7 @@
    */
   async function fetchVehicleStatus(vehicleId, label = vehicleId) {
     try {
-      return await protokolliereAbruf(`Fahrzeug-Status: ${label} (dispatch.php)`, async () => {
+      return await protokolliereAbruf(`Fahrzeug-Status ${label} (dispatch.php)`, async () => {
         const heute = new Date();
         const datumIso = `${heute.getFullYear()}-${String(heute.getMonth() + 1).padStart(2, '0')}-${String(heute.getDate()).padStart(2, '0')}`;
         const url = `/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}&date=${datumIso}`;
@@ -389,23 +363,57 @@
   /**
    * Holt den Status ALLER Fahrzeuge (aktuelles Fahrzeug direkt aus dem DOM,
    * die anderen per fetch()) und liefert eine sortierte Liste.
-   * @returns {Promise<VehicleStatus[]>}
+   *
+   * Spart einen kompletten Fetch (Nutzerhinweis, siehe Chat): statt zuerst
+   * NUR die Fahrzeugliste per bare fetch() zu holen und dann JEDES Fahrzeug
+   * einzeln nachzuladen, liefert schon der ERSTE dispatch.php-Aufruf (mit
+   * ?date=heute, ohne vehicle_id) sowohl die komplette Fahrzeugliste als
+   * auch - nebenbei, weil der Server ohne vehicle_id auf das erste Fahrzeug
+   * zeigt - dessen vollen Status inkl. Wochen-Phasen in EINER Antwort. Nur
+   * die verbleibenden Fahrzeuge brauchen noch einen eigenen Fetch.
+   * Falls diese Annahme mal nicht zutrifft (vorabStatus bleibt null), fällt
+   * jedes Fahrzeug einfach auf den normalen Einzel-Fetch zurück - kein
+   * Verhalten schlechter als vorher, nur potenziell kein Fetch gespart.
+   * @returns {Promise<{name: string, status: VehicleStatus|null}[]>}
    */
   async function fetchFleetStatus() {
-    const vehicles = await getVehicleListAnywhere();
+    const onDispatchPage = /\/game\/dispatch\.php/.test(location.pathname);
+    let vehicles;
+    let vorabStatus = null;
+
+    if (onDispatchPage) {
+      vehicles = parseVehicleList();
+    } else {
+      try {
+        const heute = new Date();
+        const datumIso = `${heute.getFullYear()}-${String(heute.getMonth() + 1).padStart(2, '0')}-${String(heute.getDate()).padStart(2, '0')}`;
+        const ergebnis = await protokolliereAbruf('Fahrzeugliste + erstes Fahrzeug (dispatch.php)', async () => {
+          const res = await fetch(`/game/dispatch.php?date=${datumIso}`, { credentials: 'same-origin', cache: 'no-store' });
+          if (!res.ok) return { vehicles: [], status: null };
+          const html = await res.text();
+          const doc = safeParseHtml(html);
+          return { vehicles: parseVehicleList(doc), status: parseCurrentVehicleStatus(doc) };
+        });
+        vehicles = ergebnis.vehicles;
+        vorabStatus = ergebnis.status;
+      } catch (e) {
+        console.warn('[FI-Helper] Fahrzeugliste konnte nicht geladen werden', e);
+        vehicles = [];
+      }
+    }
+
     if (!vehicles.length) return [];
 
-    // "Schon geladen, kein Fetch nötig" gilt NUR, wenn wir wirklich auf dispatch.php
-    // sind - sonst bezieht sich "istAusgewaehlt" auf einen Hintergrund-Fetch der
-    // Fahrzeugliste, nicht auf die aktuell im Browser sichtbare Seite.
-    const onDispatchPage = /\/game\/dispatch\.php/.test(location.pathname);
-
     const results = await Promise.all(
-      vehicles.map(v =>
-        (onDispatchPage && v.istAusgewaehlt)
-          ? Promise.resolve(parseCurrentVehicleStatus())
-          : fetchVehicleStatus(v.id, v.name)
-      )
+      vehicles.map(v => {
+        // "Schon geladen, kein Fetch nötig" gilt für zwei Fälle: wir sind
+        // wirklich auf dispatch.php UND das Fahrzeug ist dort ausgewählt,
+        // ODER wir haben den Status schon aus dem Vorab-Fetch oben (die ID
+        // passt zum vom Server default ausgewählten Fahrzeug).
+        if (onDispatchPage && v.istAusgewaehlt) return Promise.resolve(parseCurrentVehicleStatus());
+        if (vorabStatus && String(vorabStatus.vehicleId) === String(v.id)) return Promise.resolve(vorabStatus);
+        return fetchVehicleStatus(v.id, v.name);
+      })
     );
 
     return vehicles.map((v, i) => ({
@@ -421,7 +429,7 @@
    */
   async function fetchLiveDriverStatus(vehicleId, label = vehicleId) {
     try {
-      return await protokolliereAbruf(`Live-Fahrerstatus: ${label} (driver_time_status.php)`, async () => {
+      return await protokolliereAbruf(`Live-Fahrerstatus ${label} (driver_time_status.php)`, async () => {
         const res = await fetch(`/game/driver_time_status.php?vehicle_id=${encodeURIComponent(vehicleId)}`, {
           credentials: 'same-origin',
           cache: 'no-store',
@@ -591,16 +599,32 @@
       .map(opt => ({ value: opt.value, label: opt.textContent.trim() }));
   }
 
-  /** Holt die Fahrzeugkategorien per fetch() nach, egal auf welcher Seite man gerade ist. */
+  /**
+   * Holt die Fahrzeugkategorien per fetch() nach, egal auf welcher Seite man
+   * gerade ist. Ändert sich praktisch nie (neue Kategorien nur bei einem
+   * Spiel-Update) - deshalb in sessionStorage gecached, damit nicht mal ein
+   * einfacher Seiten-Reload den Fetch wiederholt.
+   */
   async function getBodyTypeOptionsAnywhere() {
+    try {
+      const gecached = window.sessionStorage.getItem('fi_bodytype_optionen');
+      if (gecached) return JSON.parse(gecached);
+    } catch (e) {}
+
     const onFreightMarket = /\/game\/freight-market\.php/.test(location.pathname);
-    if (onFreightMarket) return parseBodyTypeOptions(document);
+    if (onFreightMarket) {
+      const optionen = parseBodyTypeOptions(document);
+      try { window.sessionStorage.setItem('fi_bodytype_optionen', JSON.stringify(optionen)); } catch (e) {}
+      return optionen;
+    }
     try {
       const res = await fetch('/game/freight-market.php', { credentials: 'same-origin', cache: 'no-store' });
       if (!res.ok) return [];
       const html = await res.text();
       const doc = safeParseHtml(html);
-      return parseBodyTypeOptions(doc);
+      const optionen = parseBodyTypeOptions(doc);
+      try { window.sessionStorage.setItem('fi_bodytype_optionen', JSON.stringify(optionen)); } catch (e) {}
+      return optionen;
     } catch (e) {
       console.warn('[FI-Helper] Fahrzeugkategorien konnten nicht geladen werden', e);
       return [];
@@ -621,7 +645,7 @@
    * @param {{zielStadt?: string, zielRadiusKm?: number}} filter Optional: nur Frachten mit Ziel nahe zielStadt
    */
   async function fetchFreightMarketPage(bodyType, page, perPage = 100, filter = {}) {
-    return protokolliereAbruf(`Frachtbörse Seite ${page} (${bodyType})`, async () => {
+    return protokolliereAbruf(`Frachtbörse Seite ${page} (freight-market.php, ${bodyType})`, async () => {
       let url = `/game/freight-market.php?body_type=${encodeURIComponent(bodyType)}&per_page=${perPage}&page=${page}&sort=price_km_desc`;
       if (filter.zielStadt) {
         url += `&destination_radius_city=${encodeURIComponent(filter.zielStadt)}&destination_radius_km=${filter.zielRadiusKm ?? 0}`;
@@ -1353,43 +1377,67 @@
     return details;
   }
 
-  /** Holt die Fuhrpark-Details per fetch() nach, egal auf welcher Seite man gerade ist. */
-  async function fetchFuhrparkDetails() {
+  /**
+   * Holt die Fuhrpark-Details per fetch() nach, egal auf welcher Seite man
+   * gerade ist. Ändert sich nur beim Kauf/Verkauf von Fahrzeugen/Anhängern
+   * oder neuer Fahrer-Zuweisung - deshalb gecached (30 Min., siehe
+   * NEBEN_DATEN_CACHE_TTL_MS), im Gegensatz zum eigentlichen Fahrzeug-Status.
+   * @param {boolean} erzwingeNeuladen Cache umgehen (🔄-Knopf)
+   */
+  async function fetchFuhrparkDetails(erzwingeNeuladen = false) {
+    if (!erzwingeNeuladen && nebenDatenCacheIstFrisch(fuhrparkDetailsCache)) {
+      return fuhrparkDetailsCache.daten;
+    }
     try {
       const onFuhrparkPage = /\/game\/fuhrpark\.php/.test(location.pathname);
-      if (onFuhrparkPage) return parseFuhrparkDetails();
-      return await protokolliereAbruf('Fuhrpark-Details (fuhrpark.php)', async () => {
-        const res = await fetch('/game/fuhrpark.php', { credentials: 'same-origin', cache: 'no-store' });
-        if (!res.ok) return new Map();
-        const html = await res.text();
-        const doc = safeParseHtml(html);
-        return parseFuhrparkDetails(doc);
-      });
+      const daten = onFuhrparkPage
+        ? parseFuhrparkDetails()
+        : await protokolliereAbruf('Fuhrpark (fuhrpark.php)', async () => {
+            const res = await fetch('/game/fuhrpark.php', { credentials: 'same-origin', cache: 'no-store' });
+            if (!res.ok) return new Map();
+            const html = await res.text();
+            const doc = safeParseHtml(html);
+            return parseFuhrparkDetails(doc);
+          });
+      fuhrparkDetailsCache = { daten, zeitstempel: Date.now() };
+      return daten;
     } catch (e) {
       console.warn('[FI-Helper] Fuhrpark-Details konnten nicht geladen werden', e);
-      return new Map();
+      return fuhrparkDetailsCache?.daten ?? new Map();
     }
   }
 
+  /** {wert: number, datumIso: string} - Diesel ändert sich laut Spiel nur täglich, siehe fetchDieselPreis. */
+  let dieselPreisCache = null;
+
   /**
    * Holt den aktuellen Diesel-Marktpreis von /game/pc.php per fetch() nach.
-   * Der Preis wird laut Spiel TÄGLICH neu berechnet - deshalb kein fester
-   * Wert mehr in ASSUMPTIONS, sondern hier live abgerufen (einmal pro
-   * Dashboard-Aufbau, siehe renderActiveToursDashboard). Fällt auf den
-   * zuletzt bekannten ASSUMPTIONS-Wert zurück, falls der Abruf scheitert.
+   * Der Preis wird laut Spiel TÄGLICH neu berechnet - ein zweiter Abruf am
+   * selben Kalendertag würde also garantiert denselben Wert liefern, deshalb
+   * hier über den Kalendertag gecached (nicht über eine feste TTL). Fällt
+   * auf den zuletzt bekannten ASSUMPTIONS-Wert zurück, falls der Abruf
+   * scheitert.
+   * @param {boolean} erzwingeNeuladen Cache umgehen (🔄-Knopf)
    * @returns {Promise<number|null>}
    */
-  async function fetchDieselPreis() {
+  async function fetchDieselPreis(erzwingeNeuladen = false) {
+    const heute = new Date();
+    const datumIso = `${heute.getFullYear()}-${String(heute.getMonth() + 1).padStart(2, '0')}-${String(heute.getDate()).padStart(2, '0')}`;
+    if (!erzwingeNeuladen && dieselPreisCache?.datumIso === datumIso) {
+      return dieselPreisCache.wert;
+    }
     try {
-      return await protokolliereAbruf('Dieselpreis (pc.php)', async () => {
+      const wert = await protokolliereAbruf('Dieselpreis (pc.php)', async () => {
         const onPcPage = /\/game\/pc\.php/.test(location.pathname);
         const doc = onPcPage ? document : safeParseHtml(await (await fetch('/game/pc.php', { credentials: 'same-origin', cache: 'no-store' })).text());
         const text = doc.querySelector(SELECTORS.dieselMarktpreis)?.textContent;
         return parseGermanNumber(text);
       });
+      if (wert != null) dieselPreisCache = { wert, datumIso };
+      return wert;
     } catch (e) {
       console.warn('[FI-Helper] Diesel-Marktpreis konnte nicht geladen werden', e);
-      return null;
+      return dieselPreisCache?.wert ?? null;
     }
   }
 
@@ -1410,20 +1458,28 @@
   /**
    * Zählt die Disponenten in der Personalliste (/game/staff.php) - jede
    * Personal-Kachel hat ein `.role`-Element mit dem Rollentext ("Fahrer",
-   * "Disponent", "Mechaniker", ...), siehe Chat/Nutzerhinweis.
+   * "Disponent", "Mechaniker", ...), siehe Chat/Nutzerhinweis. Ändert sich
+   * nur beim Einstellen/Kündigen von Personal - deshalb gecached (30 Min.,
+   * siehe NEBEN_DATEN_CACHE_TTL_MS).
+   * @param {boolean} erzwingeNeuladen Cache umgehen (🔄-Knopf)
    * @returns {Promise<number>}
    */
-  async function fetchDisponentenAnzahl() {
+  async function fetchDisponentenAnzahl(erzwingeNeuladen = false) {
+    if (!erzwingeNeuladen && nebenDatenCacheIstFrisch(disponentenAnzahlCache)) {
+      return disponentenAnzahlCache.anzahl;
+    }
     try {
-      return await protokolliereAbruf('Disponenten (staff.php)', async () => {
+      const anzahl = await protokolliereAbruf('Disponenten (staff.php)', async () => {
         const onStaffPage = /\/game\/staff\.php/.test(location.pathname);
         const doc = onStaffPage ? document : safeParseHtml(await (await fetch('/game/staff.php', { credentials: 'same-origin', cache: 'no-store' })).text());
         const rollen = Array.from(doc.querySelectorAll(SELECTORS.staffRolle)).map(el => el.textContent.trim());
         return rollen.filter(r => r === 'Disponent').length;
       });
+      disponentenAnzahlCache = { anzahl, zeitstempel: Date.now() };
+      return anzahl;
     } catch (e) {
       console.warn('[FI-Helper] Disponenten-Anzahl konnte nicht geladen werden', e);
-      return 0;
+      return disponentenAnzahlCache?.anzahl ?? 0;
     }
   }
 
@@ -1432,9 +1488,10 @@
    * (24h ohne Disponent, +24h je Disponent - siehe fetchDisponentenAnzahl).
    * Wird einmal pro "Beste Routen berechnen"-Lauf aufgerufen, BEVOR die
    * Routen bewertet werden (siehe routenBerechnen).
+   * @param {boolean} erzwingeNeuladen Cache umgehen (🔄-Knopf)
    */
-  async function aktualisierePlanungsfenster() {
-    const anzahlDisponenten = await fetchDisponentenAnzahl();
+  async function aktualisierePlanungsfenster(erzwingeNeuladen = false) {
+    const anzahlDisponenten = await fetchDisponentenAnzahl(erzwingeNeuladen);
     PLANUNGSFENSTER_STUNDEN = 24 * (1 + anzahlDisponenten);
   }
 
@@ -1982,10 +2039,12 @@
     if (!protokoll.length) return '';
     const gesamtMs = protokoll.reduce((sum, e) => sum + e.dauerMs, 0);
     const zeilen = protokoll
-      .map(e => `${e.fehler ? '❌' : '·'} ${e.label}: ${e.dauerMs} ms${e.fehler ? ` (Fehler: ${e.fehler})` : ''}`)
+      .map(e => e.fehler
+        ? `❌ ${e.label} fehlgeschlagen nach ${e.dauerMs} ms (${e.fehler})`
+        : `· ${e.label} geladen in ${e.dauerMs} ms`)
       .join('<br>');
     return `<div class="fi-dash-row fi-muted" style="grid-column: 1 / -1; font-size:10.5px; margin-top:16px; opacity:.75;">
-      🔧 ${protokoll.length} zusätzliche Seitenaufrufe, ${gesamtMs} ms gesamt:<br>${zeilen}
+      🔧 ${protokoll.length} zusätzliche Seitenaufrufe · ${gesamtMs} ms gesamt<br>${zeilen}
     </div>`;
   }
 
@@ -1998,6 +2057,21 @@
    */
   const marktScanCache = new Map();
   const MARKT_CACHE_TTL_MS = 10 * 60 * 1000; // 10 Minuten, danach gilt der Cache als abgelaufen
+
+  /**
+   * Cache für Daten, die sich erfahrungsgemäß selten ändern (Fuhrpark-
+   * Zusammensetzung/Stellplätze, Anzahl Disponenten) - im Gegensatz zu
+   * Fahrzeug-Status/Live-Fahrerdaten, die sich laufend ändern und deshalb
+   * NIE gecached werden dürfen. 30 Minuten TTL, plus über den 🔄-Knopf
+   * (erzwingeNeuladen) jederzeit manuell umgehbar.
+   */
+  const NEBEN_DATEN_CACHE_TTL_MS = 30 * 60 * 1000;
+  let fuhrparkDetailsCache = null; // {daten: Map, zeitstempel}
+  let disponentenAnzahlCache = null; // {anzahl, zeitstempel}
+
+  function nebenDatenCacheIstFrisch(cacheEintrag) {
+    return cacheEintrag && (Date.now() - cacheEintrag.zeitstempel) < NEBEN_DATEN_CACHE_TTL_MS;
+  }
 
   /**
    * Cache-Schlüssel nur noch nach Kategorie - der Scan läuft jetzt IMMER
@@ -2239,12 +2313,12 @@
       fiAbrufProtokoll = [];
 
       try {
-        // Diesel-Marktpreis + Disponenten-Anzahl frisch holen, unabhängig vom
-        // Frachtbörsen-Cache - beide ändern sich unabhängig von den Angeboten
-        // und müssen für eine korrekte Bewertung/Planungsfenster-Prüfung stimmen.
-        const dieselPreisLive = await fetchDieselPreis();
+        // Diesel-Marktpreis (Tages-Cache) + Disponenten-Anzahl (30-Min-Cache) -
+        // beide unabhängig vom Frachtbörsen-Cache, aber selbst gecached (siehe
+        // NEBEN_DATEN_CACHE_TTL_MS) und über den 🔄-Knopf erzwingbar neu ladbar.
+        const dieselPreisLive = await fetchDieselPreis(erzwingeNeuladen);
         if (dieselPreisLive != null) ASSUMPTIONS.dieselPreisProLiter = dieselPreisLive;
-        await aktualisierePlanungsfenster();
+        await aktualisierePlanungsfenster(erzwingeNeuladen);
 
         // Kein Server-Zielfilter mehr (siehe Chat: unzuverlässig UND wir
         // brauchen für Ketten-Touren ohnehin einen breiten, ungefilterten
@@ -2270,7 +2344,7 @@
 
         const [fleetMitLive, detailsMap] = await Promise.all([
           Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null }))),
-          fetchFuhrparkDetails(),
+          fetchFuhrparkDetails(erzwingeNeuladen),
         ]);
         const fleet = fleetMitLive.map(f => {
           const details = f.status?.vehicleId ? detailsMap.get(String(f.status.vehicleId)) : null;
