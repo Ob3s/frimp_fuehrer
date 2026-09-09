@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FrachtImperium Helper
 // @namespace    noone.frachtimperium
-// @version      0.29.2
+// @version      0.29.3
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -61,6 +61,9 @@
     filterBodyTypeSelect: 'select[name="body_type"]',
     filterStartCountrySelect: 'select[name="start_country"]',
     filterDestCountrySelect: 'select[name="destination_country"]',
+
+    // --- Seite: /game/pc.php (Marktpreise) ---
+    dieselMarktpreis: '.diesel-main-price strong', // Text z.B. "2,159 €/L" - ändert sich täglich
 
     // --- Seite: Finanzen / Kredit (noch nicht analysiert) ---
     kreditZinssatz: null,
@@ -1145,11 +1148,10 @@
   // ============================================================
 
   const ASSUMPTIONS = {
-    // Kalibriert an den tatsächlich getankten Mengen aus 11 echten abgeschlossenen
-    // Touren (siehe Chat, 2026-09-09): ergab konsistent ~2,03 €/L statt der alten
-    // 2,06-€-Annahme. Laut Nutzer wird der Preis auf /game/pc.php TÄGLICH neu
-    // berechnet - das hier ist nur ein Snapshot, keine feste Konstante.
-    // TODO: dynamisch von pc.php holen statt hartcodiert (braucht HTML-Beispiel).
+    // NUR EIN FALLBACK für den Fall, dass fetchDieselPreis() (siehe unten)
+    // scheitert - der Preis wird laut Spiel TÄGLICH neu berechnet, deshalb
+    // wird er bei jedem Dashboard-Aufbau live von /game/pc.php geholt und
+    // überschreibt diesen Wert zur Laufzeit (siehe renderActiveToursDashboard).
     dieselPreisProLiter: 2.03,
   };
 
@@ -1315,6 +1317,27 @@
     } catch (e) {
       console.warn('[FI-Helper] Fuhrpark-Details konnten nicht geladen werden', e);
       return new Map();
+    }
+  }
+
+  /**
+   * Holt den aktuellen Diesel-Marktpreis von /game/pc.php per fetch() nach.
+   * Der Preis wird laut Spiel TÄGLICH neu berechnet - deshalb kein fester
+   * Wert mehr in ASSUMPTIONS, sondern hier live abgerufen (einmal pro
+   * Dashboard-Aufbau, siehe renderActiveToursDashboard). Fällt auf den
+   * zuletzt bekannten ASSUMPTIONS-Wert zurück, falls der Abruf scheitert.
+   * @returns {Promise<number|null>}
+   */
+  async function fetchDieselPreis() {
+    try {
+      const onPcPage = /\/game\/pc\.php/.test(location.pathname);
+      const doc = onPcPage ? document : safeParseHtml(await (await fetch('/game/pc.php', { credentials: 'same-origin', cache: 'no-store' })).text());
+      const text = doc.querySelector(SELECTORS.dieselMarktpreis)?.textContent;
+      const preis = parseGermanNumber(text);
+      return preis;
+    } catch (e) {
+      console.warn('[FI-Helper] Diesel-Marktpreis konnte nicht geladen werden', e);
+      return null;
     }
   }
 
@@ -1955,6 +1978,12 @@
       wrap.appendChild(dashboard);
     }
 
+    // Diesel-Marktpreis ändert sich laut Spiel täglich - einmal pro
+    // Dashboard-Aufbau live abrufen und den Fallback in ASSUMPTIONS
+    // überschreiben, damit alle Kostenrechnungen den aktuellen Preis nutzen.
+    const dieselPreisLive = await fetchDieselPreis();
+    if (dieselPreisLive != null) ASSUMPTIONS.dieselPreisProLiter = dieselPreisLive;
+
     // --- Kopfbereich (Kontostand/Statistik) ---
     async function aktualisiereKopf() {
       const kontostand = parseKontostand();
@@ -1964,6 +1993,7 @@
         html += `<div class="fi-dash-pill ${kontostand.negativ ? 'is-negative' : 'is-positive'}">💰 ${kontostand.text}</div>`;
       }
       Object.entries(stats).forEach(([k, v]) => { html += `<div class="fi-dash-pill">${k}: ${v}</div>`; });
+      html += `<div class="fi-dash-pill">⛽ ${ASSUMPTIONS.dieselPreisProLiter.toFixed(3).replace('.', ',')} €/L${dieselPreisLive == null ? ' (Fallback)' : ''}</div>`;
       const kopfEl = document.getElementById('fi-dash-header');
       if (kopfEl) kopfEl.innerHTML = html;
     }
