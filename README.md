@@ -22,3 +22,18 @@ Baut auf `/game/active_tours.php` ein eigenständiges "Cockpit"-Dashboard, das:
 - Keine externen Abhängigkeiten, `@grant none`
 - Annehmen/Einplanen von Frachten sind echte, bindende Spielaktionen (Vertragsstrafe bei Nichtlieferung) – das Script fragt vor jeder solchen Aktion per Bestätigungsdialog nach
 - Einige Annahmen (Maut, Verschleiß, Ø-Geschwindigkeit) sind noch nicht vollständig kalibriert, siehe Kommentare im Script
+
+## Entwicklung – Versionierung
+
+Tampermonkey erkennt ein verfügbares Update nur über eine geänderte `@version`
+im Script-Header. Ein `pre-commit`-Hook (`.githooks/pre-commit`) erhöht die
+Patch-Version deshalb automatisch bei jedem Commit, der
+`frachtimperium-helper.user.js` verändert. Für einen bewussten Minor-/Major-
+Sprung (z.B. `0.29.0` → `0.30.0`) einfach die `@version`-Zeile selbst im
+Commit anpassen – der Hook erkennt das und bumpt dann nicht zusätzlich.
+
+Einmalig nach jedem frischen `git clone` aktivieren:
+
+```bash
+git config core.hooksPath .githooks
+```

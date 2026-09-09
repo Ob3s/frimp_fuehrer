@@ -1,0 +1,37 @@
+#!/bin/sh
+# Zählt automatisch die @version-Patch-Nummer im Userscript-Header hoch,
+# sobald frachtimperium-helper.user.js Teil eines Commits ist. Tampermonkey
+# erkennt Updates nur über @version - ohne Bump würde @updateURL nie ein
+# neues Update anbieten, egal wie oft wir pushen.
+#
+# Wurde die @version-Zeile in diesem Commit schon manuell geändert (z.B. für
+# einen bewussten Minor-/Major-Sprung), lässt der Hook sie in Ruhe - er bumpt
+# nur den Patch-Teil, wenn die Zeile gegenüber HEAD unverändert ist.
+set -e
+FILE="frachtimperium-helper.user.js"
+
+if ! git diff --cached --name-only | grep -qx "$FILE"; then
+  exit 0
+fi
+
+OLD_VERSION_LINE=$(git show HEAD:"$FILE" 2>/dev/null | grep -m1 '// @version' || true)
+NEW_VERSION_LINE=$(grep -m1 '// @version' "$FILE" || true)
+
+if [ -z "$NEW_VERSION_LINE" ]; then
+  exit 0
+fi
+
+if [ -n "$OLD_VERSION_LINE" ] && [ "$OLD_VERSION_LINE" != "$NEW_VERSION_LINE" ]; then
+  exit 0
+fi
+
+CURRENT_VERSION=$(echo "$NEW_VERSION_LINE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+MAJOR=$(echo "$CURRENT_VERSION" | cut -d. -f1)
+MINOR=$(echo "$CURRENT_VERSION" | cut -d. -f2)
+PATCH=$(echo "$CURRENT_VERSION" | cut -d. -f3)
+NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+
+sed -i "s/\(@version[[:space:]]*\)$CURRENT_VERSION/\1$NEW_VERSION/" "$FILE"
+git add "$FILE"
+
+echo "[pre-commit] $FILE: Version $CURRENT_VERSION -> $NEW_VERSION"
