@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FrachtImperium Helper
 // @namespace    noone.frachtimperium
-// @version      0.29.3
+// @version      0.29.4
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -70,11 +70,8 @@
     kreditMaxHoehe: null,
     kreditLaufzeit: null,
 
-    // --- Seite: Personal (noch nicht analysiert) ---
-    personalListe: null,
-    personalName: null,
-    personalLohn: null,
-    personalErfahrungsstufe: null,
+    // --- Seite: /game/staff.php (Personal) ---
+    staffRolle: '.role', // Text z.B. "Fahrer" / "Disponent" / "Mechaniker" - eine je Personal-Kachel
 
     // --- Seite: Fuhrpark-Übersicht (fuhrpark.php) ---
     fuhrparkCard: '.fleet-card',                      // ein Artikel pro Fahrzeug, data-vehicle-id
@@ -93,6 +90,39 @@
     'phase-pause': 'pause',
     'phase-shift-break': 'schichtpause',
   };
+
+  /**
+   * Protokoll aller zusätzlichen Seitenaufrufe (fetch()) während EINES
+   * "Beste Routen berechnen"-Laufs - wird in routenBerechnen() zurückgesetzt
+   * und am Ende als kleine Diagnose-Zeile unter den Ergebnissen angezeigt
+   * (Nutzerwunsch: sichtbar machen, was im Hintergrund geladen wurde und wie
+   * lange es gedauert hat).
+   * @type {{label: string, dauerMs: number, fehler: string|null}[]}
+   */
+  let fiAbrufProtokoll = [];
+
+  /**
+   * Führt einen fetch()-Aufruf aus und misst dabei die Dauer fürs
+   * Abruf-Protokoll (siehe fiAbrufProtokoll). Fehler werden protokolliert,
+   * aber weitergereicht - der Aufrufer entscheidet, wie er damit umgeht.
+   * @template T
+   * @param {string} label Kurzbeschreibung für die Diagnose-Anzeige
+   * @param {() => Promise<T>} fetchAusfuehren
+   * @returns {Promise<T>}
+   */
+  async function protokolliereAbruf(label, fetchAusfuehren) {
+    const start = performance.now();
+    let fehler = null;
+    try {
+      return await fetchAusfuehren();
+    } catch (e) {
+      fehler = e?.message || String(e);
+      throw e;
+    } finally {
+      const dauerMs = Math.round(performance.now() - start);
+      fiAbrufProtokoll.push({ label, dauerMs, fehler });
+    }
+  }
 
   // ============================================================
   // 2. DATENMODELL
@@ -298,11 +328,13 @@
       return parseVehicleList();
     }
     try {
-      const res = await fetch('/game/dispatch.php', { credentials: 'same-origin', cache: 'no-store' });
-      if (!res.ok) return [];
-      const html = await res.text();
-      const doc = safeParseHtml(html);
-      return parseVehicleList(doc);
+      return await protokolliereAbruf('Fahrzeugliste (dispatch.php)', async () => {
+        const res = await fetch('/game/dispatch.php', { credentials: 'same-origin', cache: 'no-store' });
+        if (!res.ok) return [];
+        const html = await res.text();
+        const doc = safeParseHtml(html);
+        return parseVehicleList(doc);
+      });
     } catch (e) {
       console.warn('[FI-Helper] Fahrzeugliste konnte nicht geladen werden', e);
       return [];
@@ -323,18 +355,21 @@
    * mehrere Tage einzeln nachzuladen war unnötig und hat die Duplikate
    * verursacht (dieselbe Wochenansicht mehrfach reingemischt).
    * @param {string} vehicleId
+   * @param {string} [label] Für die Diagnose-Anzeige - z.B. der Fahrzeugname statt der reinen ID
    * @returns {Promise<VehicleStatus|null>}
    */
-  async function fetchVehicleStatus(vehicleId) {
+  async function fetchVehicleStatus(vehicleId, label = vehicleId) {
     try {
-      const heute = new Date();
-      const datumIso = `${heute.getFullYear()}-${String(heute.getMonth() + 1).padStart(2, '0')}-${String(heute.getDate()).padStart(2, '0')}`;
-      const url = `/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}&date=${datumIso}`;
-      const res = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
-      if (!res.ok) return null;
-      const html = await res.text();
-      const doc = safeParseHtml(html);
-      return parseCurrentVehicleStatus(doc);
+      return await protokolliereAbruf(`Fahrzeug-Status: ${label} (dispatch.php)`, async () => {
+        const heute = new Date();
+        const datumIso = `${heute.getFullYear()}-${String(heute.getMonth() + 1).padStart(2, '0')}-${String(heute.getDate()).padStart(2, '0')}`;
+        const url = `/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}&date=${datumIso}`;
+        const res = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+        if (!res.ok) return null;
+        const html = await res.text();
+        const doc = safeParseHtml(html);
+        return parseCurrentVehicleStatus(doc);
+      });
     } catch (e) {
       console.warn(`[FI-Helper] Fahrzeug ${vehicleId} konnte nicht geladen werden`, e);
       return null;
@@ -359,7 +394,7 @@
       vehicles.map(v =>
         (onDispatchPage && v.istAusgewaehlt)
           ? Promise.resolve(parseCurrentVehicleStatus())
-          : fetchVehicleStatus(v.id)
+          : fetchVehicleStatus(v.id, v.name)
       )
     );
 
@@ -374,16 +409,18 @@
    * genau der Endpunkt, den das Spiel selbst per fetch() nutzt.
    * @param {string|number} vehicleId
    */
-  async function fetchLiveDriverStatus(vehicleId) {
+  async function fetchLiveDriverStatus(vehicleId, label = vehicleId) {
     try {
-      const res = await fetch(`/game/driver_time_status.php?vehicle_id=${encodeURIComponent(vehicleId)}`, {
-        credentials: 'same-origin',
-        cache: 'no-store',
-        headers: { Accept: 'application/json' },
+      return await protokolliereAbruf(`Live-Fahrerstatus: ${label} (driver_time_status.php)`, async () => {
+        const res = await fetch(`/game/driver_time_status.php?vehicle_id=${encodeURIComponent(vehicleId)}`, {
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: { Accept: 'application/json' },
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data?.ok ? data : null;
       });
-      if (!res.ok) return null;
-      const data = await res.json();
-      return data?.ok ? data : null;
     } catch (e) {
       console.warn('[FI-Helper] Live-Fahrerstatus nicht abrufbar', e);
       return null;
@@ -574,15 +611,17 @@
    * @param {{zielStadt?: string, zielRadiusKm?: number}} filter Optional: nur Frachten mit Ziel nahe zielStadt
    */
   async function fetchFreightMarketPage(bodyType, page, perPage = 100, filter = {}) {
-    let url = `/game/freight-market.php?body_type=${encodeURIComponent(bodyType)}&per_page=${perPage}&page=${page}&sort=price_km_desc`;
-    if (filter.zielStadt) {
-      url += `&destination_radius_city=${encodeURIComponent(filter.zielStadt)}&destination_radius_km=${filter.zielRadiusKm ?? 0}`;
-    }
-    const res = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
-    if (!res.ok) return { angebote: [], pagination: null };
-    const html = await res.text();
-    const doc = safeParseHtml(html);
-    return { angebote: parseFrachtboerse(doc), pagination: parsePaginationInfo(doc) };
+    return protokolliereAbruf(`Frachtbörse Seite ${page} (${bodyType})`, async () => {
+      let url = `/game/freight-market.php?body_type=${encodeURIComponent(bodyType)}&per_page=${perPage}&page=${page}&sort=price_km_desc`;
+      if (filter.zielStadt) {
+        url += `&destination_radius_city=${encodeURIComponent(filter.zielStadt)}&destination_radius_km=${filter.zielRadiusKm ?? 0}`;
+      }
+      const res = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+      if (!res.ok) return { angebote: [], pagination: null };
+      const html = await res.text();
+      const doc = safeParseHtml(html);
+      return { angebote: parseFrachtboerse(doc), pagination: parsePaginationInfo(doc) };
+    });
   }
 
   /**
@@ -1309,11 +1348,13 @@
     try {
       const onFuhrparkPage = /\/game\/fuhrpark\.php/.test(location.pathname);
       if (onFuhrparkPage) return parseFuhrparkDetails();
-      const res = await fetch('/game/fuhrpark.php', { credentials: 'same-origin', cache: 'no-store' });
-      if (!res.ok) return new Map();
-      const html = await res.text();
-      const doc = safeParseHtml(html);
-      return parseFuhrparkDetails(doc);
+      return await protokolliereAbruf('Fuhrpark-Details (fuhrpark.php)', async () => {
+        const res = await fetch('/game/fuhrpark.php', { credentials: 'same-origin', cache: 'no-store' });
+        if (!res.ok) return new Map();
+        const html = await res.text();
+        const doc = safeParseHtml(html);
+        return parseFuhrparkDetails(doc);
+      });
     } catch (e) {
       console.warn('[FI-Helper] Fuhrpark-Details konnten nicht geladen werden', e);
       return new Map();
@@ -1330,11 +1371,12 @@
    */
   async function fetchDieselPreis() {
     try {
-      const onPcPage = /\/game\/pc\.php/.test(location.pathname);
-      const doc = onPcPage ? document : safeParseHtml(await (await fetch('/game/pc.php', { credentials: 'same-origin', cache: 'no-store' })).text());
-      const text = doc.querySelector(SELECTORS.dieselMarktpreis)?.textContent;
-      const preis = parseGermanNumber(text);
-      return preis;
+      return await protokolliereAbruf('Dieselpreis (pc.php)', async () => {
+        const onPcPage = /\/game\/pc\.php/.test(location.pathname);
+        const doc = onPcPage ? document : safeParseHtml(await (await fetch('/game/pc.php', { credentials: 'same-origin', cache: 'no-store' })).text());
+        const text = doc.querySelector(SELECTORS.dieselMarktpreis)?.textContent;
+        return parseGermanNumber(text);
+      });
     } catch (e) {
       console.warn('[FI-Helper] Diesel-Marktpreis konnte nicht geladen werden', e);
       return null;
@@ -1347,12 +1389,44 @@
 
   /**
    * OFFIZIELLE Regel aus dem Spiel-Wiki (Disponentenregeln): Ohne Disponent
-   * darf nur 24h im Voraus geplant werden - jeder weitere aktive Disponent
-   * erweitert das Fenster um 24h. Wir kennen deine Disponenten-Anzahl aktuell
-   * NICHT automatisch (müsste aus staff.php geparst werden) - falls du
-   * Disponenten einstellst, sag mir die Anzahl, dann passe ich das hier an.
+   * darf nur 24h im Voraus geplant werden - jeder weitere Disponent
+   * erweitert das Fenster um 24h. `let` statt `const`, weil
+   * aktualisierePlanungsfenster() den Wert bei jedem Dashboard-Aufbau aus
+   * der echten Disponenten-Anzahl (staff.php) neu berechnet - 24 ist nur
+   * der Fallback, falls der Abruf scheitert oder auf 0 Disponenten passt.
    */
-  const PLANUNGSFENSTER_STUNDEN = 24; // TODO: automatisch aus Disponenten-Anzahl ableiten, sobald staff.php geparst wird
+  let PLANUNGSFENSTER_STUNDEN = 24;
+
+  /**
+   * Zählt die Disponenten in der Personalliste (/game/staff.php) - jede
+   * Personal-Kachel hat ein `.role`-Element mit dem Rollentext ("Fahrer",
+   * "Disponent", "Mechaniker", ...), siehe Chat/Nutzerhinweis.
+   * @returns {Promise<number>}
+   */
+  async function fetchDisponentenAnzahl() {
+    try {
+      return await protokolliereAbruf('Disponenten (staff.php)', async () => {
+        const onStaffPage = /\/game\/staff\.php/.test(location.pathname);
+        const doc = onStaffPage ? document : safeParseHtml(await (await fetch('/game/staff.php', { credentials: 'same-origin', cache: 'no-store' })).text());
+        const rollen = Array.from(doc.querySelectorAll(SELECTORS.staffRolle)).map(el => el.textContent.trim());
+        return rollen.filter(r => r === 'Disponent').length;
+      });
+    } catch (e) {
+      console.warn('[FI-Helper] Disponenten-Anzahl konnte nicht geladen werden', e);
+      return 0;
+    }
+  }
+
+  /**
+   * Berechnet PLANUNGSFENSTER_STUNDEN aus der echten Disponenten-Anzahl neu
+   * (24h ohne Disponent, +24h je Disponent - siehe fetchDisponentenAnzahl).
+   * Wird einmal pro "Beste Routen berechnen"-Lauf aufgerufen, BEVOR die
+   * Routen bewertet werden (siehe routenBerechnen).
+   */
+  async function aktualisierePlanungsfenster() {
+    const anzahlDisponenten = await fetchDisponentenAnzahl();
+    PLANUNGSFENSTER_STUNDEN = 24 * (1 + anzahlDisponenten);
+  }
 
   /**
    * OFFIZIELLE Lenkzeit-Regeln aus dem Spiel-Wiki (Disposition im Detail).
@@ -1888,6 +1962,24 @@
   }
 
   /**
+   * Baut die kleine Diagnose-Zeile unter den Ergebnissen: welche
+   * zusätzlichen Seitenaufrufe für diesen "Beste Routen berechnen"-Lauf
+   * gemacht wurden und wie lange jeder gedauert hat (Nutzerwunsch, siehe
+   * Chat) - fiAbrufProtokoll wird in routenBerechnen() gesammelt.
+   * @param {{label: string, dauerMs: number, fehler: string|null}[]} protokoll
+   */
+  function baueAbrufDiagnoseHtml(protokoll) {
+    if (!protokoll.length) return '';
+    const gesamtMs = protokoll.reduce((sum, e) => sum + e.dauerMs, 0);
+    const zeilen = protokoll
+      .map(e => `${e.fehler ? '❌' : '·'} ${e.label}: ${e.dauerMs} ms${e.fehler ? ` (Fehler: ${e.fehler})` : ''}`)
+      .join('<br>');
+    return `<div class="fi-dash-row fi-muted" style="grid-column: 1 / -1; font-size:10.5px; margin-top:16px; opacity:.75;">
+      🔧 ${protokoll.length} zusätzliche Seitenaufrufe, ${gesamtMs} ms gesamt:<br>${zeilen}
+    </div>`;
+  }
+
+  /**
    * Cache für Frachtbörsen-Scans: pro Kategorie (+ Rückfracht-Filter) muss
    * nicht bei jedem Klick auf "Beste Routen berechnen" neu über 20 Seiten
    * gescannt werden - die Angebote ändern sich nicht sekündlich. Fahrzeug-/
@@ -2029,7 +2121,7 @@
       }
 
       for (const entry of fleet) {
-        const live = entry.status?.vehicleId ? await fetchLiveDriverStatus(entry.status.vehicleId) : null;
+        const live = entry.status?.vehicleId ? await fetchLiveDriverStatus(entry.status.vehicleId, entry.name) : null;
         const vehicleId = entry.status?.vehicleId;
         const titel = vehicleId
           ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;">🚐 ${entry.name}</a>`
@@ -2132,7 +2224,18 @@
       loadBtn.textContent = 'Lade …';
       resultsEl.innerHTML = '<div class="fi-empty">Starte Scan …</div>';
 
+      // Protokoll für die Diagnose-Anzeige zurücksetzen - sammelt ab hier
+      // jeden zusätzlichen Seitenaufruf dieses Laufs (siehe protokolliereAbruf).
+      fiAbrufProtokoll = [];
+
       try {
+        // Diesel-Marktpreis + Disponenten-Anzahl frisch holen, unabhängig vom
+        // Frachtbörsen-Cache - beide ändern sich unabhängig von den Angeboten
+        // und müssen für eine korrekte Bewertung/Planungsfenster-Prüfung stimmen.
+        const dieselPreisLive = await fetchDieselPreis();
+        if (dieselPreisLive != null) ASSUMPTIONS.dieselPreisProLiter = dieselPreisLive;
+        await aktualisierePlanungsfenster();
+
         // Kein Server-Zielfilter mehr (siehe Chat: unzuverlässig UND wir
         // brauchen für Ketten-Touren ohnehin einen breiten, ungefilterten
         // Datensatz) - Ziel-Filterung und Ketten-Bildung passieren komplett
@@ -2156,7 +2259,7 @@
         const kategorieLabel = options.find(o => o.value === bodyType)?.label ?? bodyType;
 
         const [fleetMitLive, detailsMap] = await Promise.all([
-          Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId) : null }))),
+          Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null }))),
           fetchFuhrparkDetails(),
         ]);
         const fleet = fleetMitLive.map(f => {
@@ -2277,6 +2380,7 @@
         loadBtn.disabled = false;
         reloadBtn.disabled = false;
         loadBtn.textContent = originalText;
+        resultsEl.insertAdjacentHTML('beforeend', baueAbrufDiagnoseHtml(fiAbrufProtokoll));
       }
     }
 
