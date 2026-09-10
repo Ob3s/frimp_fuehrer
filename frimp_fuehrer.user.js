@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.11
+// @version      0.29.12
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.11';
+  const SCRIPT_VERSION = '0.29.12';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -795,10 +795,9 @@
     // Verschleiß fließt NICHT mehr ein - laut Tour-Abrechnungen im Spiel kostet
     // er pro Tour nichts (nur eine %-Zustandsanzeige, reale Kosten erst bei
     // einer künftigen Werkstatt-Reparatur, deren Konditionen unbekannt sind).
-    const mautSatzAnfahrt = mautProKmFuerRoute(holeLandFuerStadt(vehicleStatus.freiAbOrt), holeLandFuerStadt(fracht.startOrt));
-    const mautSatzFahrt = mautProKmFuerRoute(holeLandFuerStadt(fracht.startOrt), holeLandFuerStadt(fracht.zielOrt));
-    const kostenAnfahrt = anfahrtKm * (dieselKostenProKm(false, spezifikation) + mautSatzAnfahrt);
-    const kostenFahrt = fahrtKm * (dieselKostenProKm(true, spezifikation) + mautSatzFahrt);
+    const mautSatz = spezifikation.mautProKm ?? MAUT_SATZ_DEFAULT;
+    const kostenAnfahrt = anfahrtKm * (dieselKostenProKm(false, spezifikation) + mautSatz);
+    const kostenFahrt = fahrtKm * (dieselKostenProKm(true, spezifikation) + mautSatz);
     const deckungsbeitragEuro = (fracht.verguetungEuro ?? 0) - kostenAnfahrt - kostenFahrt;
 
     const effektivProKm = gesamtFahrKm > 0 ? deckungsbeitragEuro / gesamtFahrKm : null;
@@ -1009,12 +1008,10 @@
     // Kosten: Anfahrt LEER, beide Fracht-Etappen BELADEN - keine Leerfahrt
     // zwischen den Etappen, da sie exakt an derselben Stadt anschließen.
     // Verschleiß fließt NICHT mehr ein (siehe bewerteFrachtFuerFahrzeug).
-    const mautSatzAnfahrt = mautProKmFuerRoute(holeLandFuerStadt(vehicleStatus.freiAbOrt), holeLandFuerStadt(etappe1.startOrt));
-    const mautSatzFahrt1 = mautProKmFuerRoute(holeLandFuerStadt(etappe1.startOrt), holeLandFuerStadt(etappe1.zielOrt));
-    const mautSatzFahrt2 = mautProKmFuerRoute(holeLandFuerStadt(etappe2.startOrt), holeLandFuerStadt(etappe2.zielOrt));
-    const kostenAnfahrt = anfahrtKm * (dieselKostenProKm(false, spezifikation) + mautSatzAnfahrt);
-    const kostenFahrt1 = fahrt1Km * (dieselKostenProKm(true, spezifikation) + mautSatzFahrt1);
-    const kostenFahrt2 = fahrt2Km * (dieselKostenProKm(true, spezifikation) + mautSatzFahrt2);
+    const mautSatz = spezifikation.mautProKm ?? MAUT_SATZ_DEFAULT;
+    const kostenAnfahrt = anfahrtKm * (dieselKostenProKm(false, spezifikation) + mautSatz);
+    const kostenFahrt1 = fahrt1Km * (dieselKostenProKm(true, spezifikation) + mautSatz);
+    const kostenFahrt2 = fahrt2Km * (dieselKostenProKm(true, spezifikation) + mautSatz);
     const deckungsbeitragEuro = (etappe1.verguetungEuro ?? 0) + (etappe2.verguetungEuro ?? 0) - kostenAnfahrt - kostenFahrt1 - kostenFahrt2;
 
     const gesamtFahrKm = anfahrtKm + fahrt1Km + fahrt2Km;
@@ -1235,24 +1232,21 @@
   };
 
   /**
-   * Maut in €/km NACH LAND (nicht mehr ein globaler Flatwert) - empirisch aus
-   * 11 echten abgeschlossenen Touren ermittelt (siehe Chat, 2026-09-09): 9 von
-   * 11 Touren (alle reinen DE-Touren sowie DE↔Dänemark, DE↔Niederlande,
-   * DE↔Italien) zeigten exakt 0,00 EUR/km, nur die 2 Polen-Touren (Katowice↔
-   * Hamburg, Berlin↔Katowice) zeigten 0,30 EUR/km, jeweils auf die GESAMTE
-   * Strecke (Leer- + Beladen-Anteil) angewendet. Der Nutzer kennt keine
-   * öffentliche Tabelle dafür (liegt im Spiel-Quellcode/der DB) - alle nicht
-   * gelisteten Länder sind eine unverifizierte Annahme (Default 0, weil 4 von
-   * 5 bisher beobachteten Ländern 0 waren).
+   * KORREKTUR (2026-09-10, siehe Chat): Maut ist NICHT länderabhängig, wie
+   * ursprünglich aus nur 11 Touren vermutet - das war ein Zufall der kleinen
+   * Stichprobe. Live aus 17 echten "Tour abgeschlossen"-Postfach-Nachrichten
+   * nachgerechnet (Originalmeldung mit "LKW-Maut: X € (Y km x Z EUR/km)"):
+   * Kleintransporter zahlen IMMER 0,00 €, auch auf einer Route nach Polen
+   * (Mailand → Katowice, KT 01, Maut 0,00 €). Der Solo-LKW Plane zahlt IMMER
+   * genau 0,30 €/km auf die GESAMTE Strecke, auch auf einer Route, die gar
+   * nicht durch Polen führt (Hamburg → Kuopio/Finnland, PL 01, 546,00 € =
+   * 1820 km × 0,30 €/km). Der Satz hängt also am FAHRZEUGTYP, nicht am Land -
+   * siehe mautProKm je Kategorie in FAHRZEUG_SPEZIFIKATIONEN. Für die drei
+   * Kategorien ohne eigene Tour-Belege (Containerchassis, Gefahrguttanker,
+   * Getreidekipper, Kühlkoffer, Lebensmitteltanker) ist 0,30 €/km wie bei
+   * allen anderen echten LKW eine unverifizierte Annahme (MAUT_SATZ_DEFAULT).
    */
-  const MAUT_PRO_KM_NACH_LAND = {
-    DE: 0,
-    PL: 0.30,
-    DK: 0,
-    NL: 0,
-    IT: 0,
-  };
-  const MAUT_PRO_KM_DEFAULT = 0; // unverifizierte Annahme für alle nicht gelisteten Länder
+  const MAUT_SATZ_DEFAULT = 0.30;
 
   /**
    * Fahrzeugtyp-spezifische Daten - Verbrauch, Tank UND Lade-System.
@@ -1270,6 +1264,7 @@
       verbrauchBeladenLPro100km: 12.0,
       ladeSystem: 'fix',
       ladeZeitFixStunden: 1,
+      mautProKm: 0, // live bestätigt, auch auf einer Polen-Route (siehe MAUT_SATZ_DEFAULT-Kommentar)
     },
     'Kofferaufbau': { // = "Solo-LKW Koffer" im Truck-Katalog/Fuhrpark
       tankinhaltLiter: 300,
@@ -1277,6 +1272,7 @@
       verbrauchBeladenLPro100km: 25.0,
       ladeSystem: 'palette',
       stellplaetzeGesamt: 18,
+      mautProKm: MAUT_SATZ_DEFAULT, // noch kein eigener Tour-Beleg, Annahme wie Tautliner/Plane (beide "echte LKW")
     },
     'Tautliner / Plane': { // = "Solo-LKW Plane" im Truck-Katalog/Fuhrpark
       tankinhaltLiter: 300,
@@ -1284,6 +1280,7 @@
       verbrauchBeladenLPro100km: 24.0,
       ladeSystem: 'palette',
       stellplaetzeGesamt: 18,
+      mautProKm: MAUT_SATZ_DEFAULT, // live bestätigt, auch auf einer Route ganz ohne Polen (Hamburg -> Kuopio)
     },
   };
 
@@ -1313,6 +1310,7 @@
     verbrauchBeladenLPro100km: 32.0,
     ladeSystem: 'fix',
     ladeZeitFixStunden: 1,
+    mautProKm: MAUT_SATZ_DEFAULT, // unbekannte Klasse ist eher ein echter LKW als ein Kleintransporter
   };
 
   function holeFahrzeugSpezifikation(aufbauTypLabel) {
@@ -1581,11 +1579,11 @@
   //     Minden→Aachen (Luftlinie 258km, Spiel 323km) und
   //     Gent→Berlin (Luftlinie 685km, Spiel 860km) -> beide Faktor 1,25.
   // ============================================================
-  // 3. Element je Stadt = Länder-Code (ISO 3166-1 alpha-2), aus den bekannten
-  // Länder-Blöcken der ursprünglichen Tabelle abgeleitet - wird für die
-  // Maut-Schätzung nach Land gebraucht (siehe MAUT_PRO_KM_NACH_LAND). 4.
-  // Element = Logistikfaktor der Stadt (aus der API, siehe Chat - Bedeutung
-  // noch nicht geklärt, aber schon mal mitgespeichert).
+  // 3. Element je Stadt = Länder-Code (ISO 3166-1 alpha-2) - NICHT mehr für
+  // die Maut gebraucht (die ist fahrzeugtyp-, nicht länderabhängig, siehe
+  // MAUT_SATZ_DEFAULT), aber z.B. für Stadtnamen mit Länderkürzel nützlich.
+  // 4. Element = Logistikfaktor der Stadt (aus der API, siehe Chat -
+  // Bedeutung noch nicht geklärt, aber schon mal mitgespeichert).
   let CITY_COORDS = {'Dornbirn':[47.41,9.74,'AT'],'Graz':[47.07,15.44,'AT'],'Innsbruck':[47.27,11.39,'AT'],'Klagenfurt':[46.62,14.31,'AT'],'Linz':[48.31,14.29,'AT'],'Salzburg':[47.8,13.05,'AT'],'Sankt Pölten':[48.2,15.62,'AT'],'Villach':[46.61,13.86,'AT'],'Wels':[48.16,14.03,'AT'],'Wien':[48.21,16.37,'AT'],'Antwerpen':[51.22,4.4,'BE'],'Brügge':[51.21,3.22,'BE'],'Brüssel':[50.85,4.35,'BE'],'Charleroi':[50.41,4.44,'BE'],'Gent':[51.05,3.72,'BE'],'Leuven':[50.88,4.7,'BE'],'Lüttich':[50.63,5.57,'BE'],'Mechelen':[51.03,4.48,'BE'],'Mons':[50.45,3.95,'BE'],'Namur':[50.47,4.87,'BE'],'Brünn':[49.2,16.61,'CZ'],'Budweis':[48.97,14.47,'CZ'],'Hradec Králové':[50.21,15.83,'CZ'],'Liberec':[50.77,15.06,'CZ'],'Olmütz':[49.59,17.25,'CZ'],'Ostrava':[49.84,18.29,'CZ'],'Pardubice':[50.04,15.78,'CZ'],'Pilsen':[49.74,13.38,'CZ'],'Prag':[50.08,14.44,'CZ'],'Ústí nad Labem':[50.66,14.03,'CZ'],'Aachen':[50.78,6.08,'DE'],'Aalen':[48.84,10.09,'DE'],'Arnsberg':[51.4,8.05,'DE'],'Aschaffenburg':[49.98,9.15,'DE'],'Augsburg':[48.37,10.9,'DE'],'Bamberg':[49.9,10.9,'DE'],'Bayreuth':[49.95,11.58,'DE'],'Bergheim':[50.96,6.64,'DE'],'Bergisch Gladbach':[50.99,7.13,'DE'],'Berlin':[52.52,13.4,'DE'],'Bielefeld':[52.02,8.53,'DE'],'Bocholt':[51.84,6.61,'DE'],'Bochum':[51.48,7.22,'DE'],'Bonn':[50.74,7.1,'DE'],'Bottrop':[51.52,6.93,'DE'],'Brandenburg an der Havel':[52.41,12.55,'DE'],'Braunschweig':[52.27,10.52,'DE'],'Bremen':[53.08,8.81,'DE'],'Bremerhaven':[53.55,8.58,'DE'],'Castrop-Rauxel':[51.55,7.31,'DE'],'Celle':[52.62,10.08,'DE'],'Chemnitz':[50.83,12.92,'DE'],'Cottbus':[51.76,14.33,'DE'],'Delmenhorst':[53.05,8.63,'DE'],'Detmold':[51.94,8.88,'DE'],'Dinslaken':[51.57,6.74,'DE'],'Dormagen':[51.1,6.84,'DE'],'Dorsten':[51.66,6.96,'DE'],'Dortmund':[51.51,7.47,'DE'],'Dresden':[51.05,13.74,'DE'],'Duisburg':[51.43,6.76,'DE'],'Düren':[50.8,6.49,'DE'],'Düsseldorf':[51.23,6.78,'DE'],'Erfurt':[50.98,11.03,'DE'],'Erlangen':[49.6,11,'DE'],'Essen':[51.46,7.01,'DE'],'Esslingen am Neckar':[48.74,9.31,'DE'],'Flensburg':[54.78,9.44,'DE'],'Frankfurt am Main':[50.11,8.68,'DE'],'Freiburg im Breisgau':[47.99,7.85,'DE'],'Friedrichshafen':[47.65,9.48,'DE'],'Fulda':[50.56,9.68,'DE'],'Fürth':[49.48,10.99,'DE'],'Garbsen':[52.42,9.6,'DE'],'Gelsenkirchen':[51.52,7.1,'DE'],'Gera':[50.88,12.08,'DE'],'Gladbeck':[51.57,6.99,'DE'],'Göppingen':[48.7,9.65,'DE'],'Göttingen':[51.53,9.94,'DE'],'Greifswald':[54.1,13.39,'DE'],'Grevenbroich':[51.09,6.59,'DE'],'Gütersloh':[51.91,8.38,'DE'],'Hagen':[51.36,7.47,'DE'],'Halle (Saale)':[51.48,11.97,'DE'],'Hamburg':[53.55,9.99,'DE'],'Hamm':[51.68,7.82,'DE'],'Hanau':[50.13,8.92,'DE'],'Hannover':[52.37,9.73,'DE'],'Heidelberg':[49.41,8.69,'DE'],'Heilbronn':[49.14,9.22,'DE'],'Herford':[52.11,8.67,'DE'],'Herne':[51.54,7.22,'DE'],'Herten':[51.6,7.14,'DE'],'Hildesheim':[52.15,9.95,'DE'],'Hürth':[50.87,6.87,'DE'],'Ingolstadt':[48.76,11.42,'DE'],'Iserlohn':[51.38,7.7,'DE'],'Jena':[50.93,11.59,'DE'],'Kaiserslautern':[49.44,7.75,'DE'],'Karlsruhe':[49.01,8.4,'DE'],'Kassel':[51.31,9.5,'DE'],'Kempten (Allgäu)':[47.73,10.32,'DE'],'Kerpen':[50.87,6.7,'DE'],'Kiel':[54.32,10.14,'DE'],'Koblenz':[50.36,7.59,'DE'],'Köln':[50.94,6.96,'DE'],'Konstanz':[47.66,9.18,'DE'],'Krefeld':[51.34,6.58,'DE'],'Landshut':[48.54,12.15,'DE'],'Langenfeld (Rheinland)':[51.11,6.94,'DE'],'Leipzig':[51.34,12.37,'DE'],'Leverkusen':[51.03,6.99,'DE'],'Lippstadt':[51.68,8.35,'DE'],'Lübeck':[53.87,10.68,'DE'],'Lüdenscheid':[51.22,7.63,'DE'],'Ludwigsburg':[48.9,9.19,'DE'],'Ludwigshafen am Rhein':[49.48,8.45,'DE'],'Lüneburg':[53.25,10.41,'DE'],'Lünen':[51.62,7.53,'DE'],'Magdeburg':[52.13,11.64,'DE'],'Mainz':[50,8.27,'DE'],'Mannheim':[49.49,8.47,'DE'],'Marburg':[50.81,8.77,'DE'],'Marl':[51.66,7.09,'DE'],'Minden':[52.29,8.91,'DE'],'Moers':[51.45,6.63,'DE'],'Mönchengladbach':[51.19,6.44,'DE'],'Mülheim an der Ruhr':[51.43,6.88,'DE'],'München':[48.14,11.58,'DE'],'Münster':[51.96,7.63,'DE'],'Neu-Ulm':[48.4,10,'DE'],'Neubrandenburg':[53.56,13.26,'DE'],'Neuss':[51.2,6.69,'DE'],'Neuwied':[50.43,7.46,'DE'],'Norderstedt':[53.69,10.01,'DE'],'Nürnberg':[49.45,11.08,'DE'],'Oberhausen':[51.47,6.85,'DE'],'Offenbach am Main':[50.1,8.76,'DE'],'Offenburg':[48.47,7.94,'DE'],'Oldenburg':[53.14,8.21,'DE'],'Osnabrück':[52.28,8.05,'DE'],'Paderborn':[51.72,8.75,'DE'],'Pforzheim':[48.89,8.7,'DE'],'Plauen':[50.5,12.14,'DE'],'Potsdam':[52.4,13.06,'DE'],'Ratingen':[51.3,6.85,'DE'],'Recklinghausen':[51.61,7.2,'DE'],'Regensburg':[49.02,12.1,'DE'],'Remscheid':[51.18,7.19,'DE'],'Reutlingen':[48.49,9.21,'DE'],'Rheine':[52.28,7.44,'DE'],'Rosenheim':[47.86,12.13,'DE'],'Rostock':[54.09,12.14,'DE'],'Saarbrücken':[49.24,6.99,'DE'],'Salzgitter':[52.15,10.33,'DE'],'Schwäbisch Gmünd':[48.8,9.79,'DE'],'Schwerin':[53.63,11.42,'DE'],'Siegen':[50.87,8.02,'DE'],'Sindelfingen':[48.71,9,'DE'],'Solingen':[51.17,7.08,'DE'],'Stralsund':[54.31,13.09,'DE'],'Stuttgart':[48.78,9.18,'DE'],'Trier':[49.76,6.64,'DE'],'Troisdorf':[50.81,7.15,'DE'],'Tübingen':[48.52,9.06,'DE'],'Ulm':[48.4,9.99,'DE'],'Unna':[51.53,7.68,'DE'],'Velbert':[51.34,7.05,'DE'],'Viersen':[51.25,6.4,'DE'],'Villingen-Schwenningen':[48.06,8.46,'DE'],'Weimar':[50.98,11.33,'DE'],'Wesel':[51.66,6.62,'DE'],'Wiesbaden':[50.08,8.24,'DE'],'Wilhelmshaven':[53.53,8.11,'DE'],'Witten':[51.44,7.34,'DE'],'Wolfsburg':[52.42,10.79,'DE'],'Worms':[49.63,8.36,'DE'],'Wuppertal':[51.26,7.15,'DE'],'Würzburg':[49.79,9.93,'DE'],'Zwickau':[50.72,12.49,'DE'],'Aalborg':[57.05,9.92,'DK'],'Aarhus':[56.16,10.2,'DK'],'Esbjerg':[55.47,8.45,'DK'],'Horsens':[55.86,9.85,'DK'],'Kolding':[55.49,9.47,'DK'],'Kopenhagen':[55.68,12.57,'DK'],'Odense':[55.4,10.38,'DK'],'Randers':[56.46,10.04,'DK'],'Roskilde':[55.64,12.08,'DK'],'Vejle':[55.71,9.54,'DK'],'Alicante':[38.35,-0.48,'ES'],'Barcelona':[41.39,2.17,'ES'],'Bilbao':[43.26,-2.93,'ES'],'Madrid':[40.42,-3.7,'ES'],'Málaga':[36.72,-4.42,'ES'],'Murcia':[37.99,-1.13,'ES'],'Palma':[39.57,2.65,'ES'],'Sevilla':[37.39,-5.99,'ES'],'Valencia':[39.47,-0.38,'ES'],'Zaragoza':[41.65,-0.88,'ES'],'Espoo':[60.21,24.66,'FI'],'Helsinki':[60.17,24.94,'FI'],'Jyväskylä':[62.24,25.75,'FI'],'Kuopio':[62.89,27.68,'FI'],'Lahti':[60.98,25.66,'FI'],'Oulu':[65.01,25.47,'FI'],'Pori':[61.48,21.8,'FI'],'Tampere':[61.5,23.76,'FI'],'Turku':[60.45,22.27,'FI'],'Vantaa':[60.29,25.04,'FI'],'Angers':[47.47,-0.55,'FR'],'Bordeaux':[44.84,-0.58,'FR'],'Dijon':[47.32,5.04,'FR'],'Grenoble':[45.19,5.72,'FR'],'Le Havre':[49.49,0.11,'FR'],'Lille':[50.63,3.06,'FR'],'Lyon':[45.76,4.84,'FR'],'Marseille':[43.3,5.37,'FR'],'Montpellier':[43.61,3.88,'FR'],'Nantes':[47.22,-1.55,'FR'],'Nice':[43.71,7.26,'FR'],'Nîmes':[43.84,4.36,'FR'],'Paris':[48.86,2.35,'FR'],'Reims':[49.26,4.03,'FR'],'Rennes':[48.11,-1.68,'FR'],'Saint-Étienne':[45.44,4.39,'FR'],'Strasbourg':[48.58,7.75,'FR'],'Toulon':[43.12,5.93,'FR'],'Toulouse':[43.6,1.44,'FR'],'Villeurbanne':[45.77,4.88,'FR'],'Bari':[41.12,16.87,'IT'],'Bologna':[44.49,11.34,'IT'],'Florenz':[43.77,11.25,'IT'],'Genua':[44.41,8.93,'IT'],'Mailand':[45.46,9.19,'IT'],'Neapel':[40.85,14.27,'IT'],'Palermo':[38.12,13.36,'IT'],'Rom':[41.9,12.5,'IT'],'Turin':[45.07,7.69,'IT'],'Venedig':[45.44,12.32,'IT'],'Diekirch':[49.87,6.16,'LU'],'Differdingen':[49.52,5.89,'LU'],'Düdelingen':[49.48,6.09,'LU'],'Esch an der Alzette':[49.5,5.98,'LU'],'Ettelbrück':[49.85,6.1,'LU'],'Grevenmacher':[49.68,6.44,'LU'],'Luxemburg':[49.61,6.13,'LU'],'Mersch':[49.75,6.1,'LU'],'Remich':[49.54,6.37,'LU'],'Wiltz':[49.97,5.93,'LU'],'Almere':[52.35,5.26,'NL'],'Amsterdam':[52.37,4.9,'NL'],'Breda':[51.59,4.78,'NL'],'Den Haag':[52.08,4.31,'NL'],'Eindhoven':[51.44,5.48,'NL'],'Groningen':[53.22,6.57,'NL'],'Nijmegen':[51.84,5.85,'NL'],'Rotterdam':[51.92,4.48,'NL'],'Tilburg':[51.56,5.09,'NL'],'Utrecht':[52.09,5.12,'NL'],'Bergen':[60.39,5.32,'NO'],'Drammen':[59.74,10.2,'NO'],'Fredrikstad':[59.22,10.95,'NO'],'Kristiansand':[58.15,7.99,'NO'],'Oslo':[59.91,10.75,'NO'],'Sandnes':[58.85,5.74,'NO'],'Sarpsborg':[59.28,11.11,'NO'],'Stavanger':[58.97,5.73,'NO'],'Tromsø':[69.65,18.96,'NO'],'Trondheim':[63.43,10.39,'NO'],'Breslau':[51.11,17.04,'PL'],'Bydgoszcz':[53.12,18,'PL'],'Danzig':[54.35,18.65,'PL'],'Katowice':[50.26,19.02,'PL'],'Krakau':[50.06,19.94,'PL'],'Lublin':[51.25,22.57,'PL'],'Łódź':[51.76,19.46,'PL'],'Posen':[52.41,16.93,'PL'],'Stettin':[53.43,14.55,'PL'],'Warschau':[52.23,21.01,'PL'],'Göteborg':[57.71,11.97,'SE'],'Helsingborg':[56.05,12.69,'SE'],'Jönköping':[57.78,14.16,'SE'],'Linköping':[58.41,15.62,'SE'],'Malmö':[55.6,13,'SE'],'Norrköping':[58.59,16.19,'SE'],'Örebro':[59.27,15.21,'SE'],'Stockholm':[59.33,18.07,'SE'],'Uppsala':[59.86,17.64,'SE'],'Västerås':[59.61,16.55,'SE']};
 
   const ROAD_FACTOR = 1.25; // Straße ist im Schnitt ~25% länger als Luftlinie
@@ -1617,24 +1615,6 @@
   function geschaetzteStrassenKm(stadtA, stadtB) {
     const luft = luftlinieKm(stadtA, stadtB);
     return luft === null ? null : Math.round(luft * ROAD_FACTOR);
-  }
-
-  /** @returns {string|null} Länder-Code (z.B. 'DE', 'PL') oder null falls Stadt unbekannt */
-  function holeLandFuerStadt(stadt) {
-    return CITY_COORDS[stadt]?.[2] ?? null;
-  }
-
-  /**
-   * Schätzt den Maut-Satz (€/km) für eine Teilstrecke zwischen zwei Ländern -
-   * nimmt den höheren der beiden Länder-Sätze an (siehe MAUT_PRO_KM_NACH_LAND).
-   * Mit den bisherigen Daten nicht unterscheidbar, welches Land bei einer
-   * reinen Durchfahrt wirklich zählt - "höherer Satz gewinnt" ist die
-   * vorsichtigere Annahme (unterschätzt die Maut nie).
-   */
-  function mautProKmFuerRoute(landA, landB) {
-    const satzA = landA != null && MAUT_PRO_KM_NACH_LAND[landA] != null ? MAUT_PRO_KM_NACH_LAND[landA] : MAUT_PRO_KM_DEFAULT;
-    const satzB = landB != null && MAUT_PRO_KM_NACH_LAND[landB] != null ? MAUT_PRO_KM_NACH_LAND[landB] : MAUT_PRO_KM_DEFAULT;
-    return Math.max(satzA, satzB);
   }
 
   /**
