@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.16
+// @version      0.29.17
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.16';
+  const SCRIPT_VERSION = '0.29.17';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2863,6 +2863,13 @@
          Breite - deshalb hier gezielt zurückgesetzt (siehe Chat: Nutzer hat
          die doppelte Breite zu Recht bemängelt). */
       .fi-referenz-karte.is-open { grid-column: auto !important; }
+      /* .fleet-info ist im echten CSS fix auf 3 Spalten ausgelegt - passt nur
+         bei der (dort üblichen) doppelten Breite. Bei unserer normalen
+         1-Spalten-Breite quetscht das sonst jede Zeile auf ~100px und lässt
+         Labels mehrzeilig umbrechen, was die Kachel unnötig hoch macht
+         (siehe Chat: Nutzer wollte auch die Höhe passend). 2 Spalten passen
+         bei 352px Kartenbreite gut und halbieren die Zeilenzahl gegenüber 1. */
+      .fi-referenz-karte .fleet-info { grid-template-columns: repeat(2, 1fr) !important; }
       .fi-referenz-thumb { background: rgba(255,255,255,.04); }
       .fi-referenz-thumb img { width: 100%; height: auto; display: block; }
       .fi-referenz-badge { background: rgba(255,217,138,.18); color: #ffd98a; }
