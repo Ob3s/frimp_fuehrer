@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.14
+// @version      0.29.15
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.14';
+  const SCRIPT_VERSION = '0.29.15';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2817,22 +2817,28 @@
   //     für nicht im Angebot befindliche Fahrzeuge nicht gibt - ein Klick
   //     darf hier NIE einen echten Kauf/Leasing-Request auslösen).
   // ============================================================
+  // Bild-Basis der Wiki-Galerie - jede Fahrzeugseite hat ein eigenes, NICHT
+  // schematisch aus dem Seiten-Slug ableitbares Dateinamen-Schema (z.B.
+  // "tautliner-plane.png" bei Slug "tautlinerplane", "containerchassi.png"
+  // ohne "s" bei Slug "containerchassis") - deshalb jede Datei einzeln per
+  // Live-Abruf der jeweiligen Wiki-Seite verifiziert, nicht geraten.
+  const WIKI_BILD_BASIS = 'https://hilfe.frachtimperium.de/uploads/images/gallery/2026-06/scaled-1680-/';
   const WIKI_FAHRZEUG_KATALOG = [
-    { name: 'Kleintransporter', typ: 'Fahrzeug', aufbau: 'Kleintransporter', tankinhaltLiter: 80, verbrauchLeer: 9.0, verbrauchBeladen: 12.0, preisNeu: 35000, preisGebraucht: 18000, level: 1, fahrer: ['Führerschein B'] },
-    { name: 'Solo-LKW Koffer', typ: 'Fahrzeug', aufbau: 'Koffer', stellplaetze: 18, tankinhaltLiter: 300, verbrauchLeer: 21.0, verbrauchBeladen: 25.0, anhaengerMoeglich: 'Koffer-Anhänger', preisNeu: 95000, preisGebraucht: 55000, level: 2, fahrer: ['Führerschein C', 'Solo-LKW'] },
-    { name: 'Koffer-Anhänger', typ: 'Anhänger', stellplaetze: 18, preisNeu: 38000, preisGebraucht: null, level: 6, koppelbarMit: ['Solo-LKW Koffer'] },
-    { name: 'Solo-LKW Kühlkoffer', typ: 'Fahrzeug', aufbau: 'Kühlkoffer', stellplaetze: 18, tankinhaltLiter: 300, verbrauchLeer: 24.0, verbrauchBeladen: 28.0, anhaengerMoeglich: 'Kühler-Anhänger', preisNeu: 125000, preisGebraucht: 75000, level: 3, fahrer: ['Führerschein C', 'Solo-LKW', 'Kühlung'] },
-    { name: 'Kühler-Anhänger', typ: 'Anhänger', stellplaetze: 18, preisNeu: 46000, preisGebraucht: null, level: 7, koppelbarMit: ['Solo-LKW Kühlkoffer'], fahrer: ['Kühlung'] },
-    { name: 'Solo-LKW Plane', typ: 'Fahrzeug', aufbau: 'Plane', stellplaetze: 18, tankinhaltLiter: 300, verbrauchLeer: 19.0, verbrauchBeladen: 24.0, anhaengerMoeglich: 'Plane Anhänger', preisNeu: null, preisGebraucht: null, levelText: 'Nur durch das Tutorial' },
-    { name: 'Plane Anhänger', typ: 'Anhänger', stellplaetze: 18, preisNeu: 34000, preisGebraucht: null, level: 10, koppelbarMit: ['Solo-LKW Plane'] },
-    { name: 'Standard-Sattelzugmaschine', typ: 'Zugmaschine', tankinhaltLiter: 600, verbrauchLeer: 25.0, verbrauchBeladen: 32.0, preisNeu: 135000, preisGebraucht: 75000, level: 4, fahrer: ['Führerschein CE', 'SZM'], koppelbarMit: ['Tautliner/Plane', 'Kühlauflieger', 'Lebensmitteltanker', 'Gefahrguttanker', 'Containerchassis', 'Getreidekipper'] },
-    { name: 'Premium-Sattelzugmaschine', typ: 'Zugmaschine', tankinhaltLiter: 1200, verbrauchLeer: 19.0, verbrauchBeladen: 24.0, preisNeu: 185000, preisGebraucht: 115000, level: 5, fahrer: ['Führerschein CE', 'SZM'], koppelbarMit: ['Tautliner/Plane', 'Kühlauflieger', 'Lebensmitteltanker', 'Gefahrguttanker', 'Containerchassis', 'Getreidekipper'] },
-    { name: 'Tautliner/Plane', typ: 'Auflieger', stellplaetze: 34, preisNeu: 42000, preisGebraucht: 24000, level: 4, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'] },
-    { name: 'Kühlauflieger', typ: 'Auflieger', stellplaetze: 33, preisNeu: 72000, preisGebraucht: 44000, level: 5, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], fahrer: ['Kühlung'] },
-    { name: 'Lebensmitteltanker', typ: 'Auflieger', preisNeu: 95000, preisGebraucht: 60000, level: 6, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], fahrer: ['Tanker'] },
-    { name: 'Gefahrguttanker', typ: 'Auflieger', preisNeu: 135000, preisGebraucht: 85000, level: 7, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], fahrer: ['Tanker', 'Gefahrgut (ADR)'] },
-    { name: 'Getreidekipper', typ: 'Auflieger', preisNeu: 49000, preisGebraucht: 33000, level: 8, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], zulGesamtgewichtT: 36, nutzlastT: 30, leergewichtT: 6 },
-    { name: 'Containerchassis', typ: 'Auflieger', kapazitaet: '1× 40 Fuß oder 2× 20 Fuß', preisNeu: 25890, preisGebraucht: 15000, level: 9, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], zulGesamtgewichtT: 40, nutzlastT: 36, leergewichtT: 4 },
+    { name: 'Kleintransporter', typ: 'Fahrzeug', bild: 'fi-kleintransporter.png', aufbau: 'Kleintransporter', tankinhaltLiter: 80, verbrauchLeer: 9.0, verbrauchBeladen: 12.0, preisNeu: 35000, preisGebraucht: 18000, level: 1, fahrer: ['Führerschein B'] },
+    { name: 'Solo-LKW Koffer', typ: 'Fahrzeug', bild: 'fi-solo-lkw-koffer.png', aufbau: 'Koffer', stellplaetze: 18, tankinhaltLiter: 300, verbrauchLeer: 21.0, verbrauchBeladen: 25.0, anhaengerMoeglich: 'Koffer-Anhänger', preisNeu: 95000, preisGebraucht: 55000, level: 2, fahrer: ['Führerschein C', 'Solo-LKW'] },
+    { name: 'Koffer-Anhänger', typ: 'Anhänger', bild: 'fi-koffer-anhanger.png', stellplaetze: 18, preisNeu: 38000, preisGebraucht: null, level: 6, koppelbarMit: ['Solo-LKW Koffer'] },
+    { name: 'Solo-LKW Kühlkoffer', typ: 'Fahrzeug', bild: 'fi-solo-lkw-kuhlkoffer.png', aufbau: 'Kühlkoffer', stellplaetze: 18, tankinhaltLiter: 300, verbrauchLeer: 24.0, verbrauchBeladen: 28.0, anhaengerMoeglich: 'Kühler-Anhänger', preisNeu: 125000, preisGebraucht: 75000, level: 3, fahrer: ['Führerschein C', 'Solo-LKW', 'Kühlung'] },
+    { name: 'Kühler-Anhänger', typ: 'Anhänger', bild: 'fi-kuhler-anhanger.png', stellplaetze: 18, preisNeu: 46000, preisGebraucht: null, level: 7, koppelbarMit: ['Solo-LKW Kühlkoffer'], fahrer: ['Kühlung'] },
+    { name: 'Solo-LKW Plane', typ: 'Fahrzeug', bild: 'fi-solo-lkw-plane.png', aufbau: 'Plane', stellplaetze: 18, tankinhaltLiter: 300, verbrauchLeer: 19.0, verbrauchBeladen: 24.0, anhaengerMoeglich: 'Plane Anhänger', preisNeu: null, preisGebraucht: null, levelText: 'Nur durch das Tutorial' },
+    { name: 'Plane Anhänger', typ: 'Anhänger', bild: 'fi-plane-anhanger.png', stellplaetze: 18, preisNeu: 34000, preisGebraucht: null, level: 10, koppelbarMit: ['Solo-LKW Plane'] },
+    { name: 'Standard-Sattelzugmaschine', typ: 'Zugmaschine', bild: 'fi-standard-sattelzugmaschine.png', tankinhaltLiter: 600, verbrauchLeer: 25.0, verbrauchBeladen: 32.0, preisNeu: 135000, preisGebraucht: 75000, level: 4, fahrer: ['Führerschein CE', 'SZM'], koppelbarMit: ['Tautliner/Plane', 'Kühlauflieger', 'Lebensmitteltanker', 'Gefahrguttanker', 'Containerchassis', 'Getreidekipper'] },
+    { name: 'Premium-Sattelzugmaschine', typ: 'Zugmaschine', bild: 'fi-premium-sattelzugmaschine.png', tankinhaltLiter: 1200, verbrauchLeer: 19.0, verbrauchBeladen: 24.0, preisNeu: 185000, preisGebraucht: 115000, level: 5, fahrer: ['Führerschein CE', 'SZM'], koppelbarMit: ['Tautliner/Plane', 'Kühlauflieger', 'Lebensmitteltanker', 'Gefahrguttanker', 'Containerchassis', 'Getreidekipper'] },
+    { name: 'Tautliner/Plane', typ: 'Auflieger', bild: 'fi-tautliner-plane.png', stellplaetze: 34, preisNeu: 42000, preisGebraucht: 24000, level: 4, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'] },
+    { name: 'Kühlauflieger', typ: 'Auflieger', bild: 'fi-kuhlauflieger.png', stellplaetze: 33, preisNeu: 72000, preisGebraucht: 44000, level: 5, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], fahrer: ['Kühlung'] },
+    { name: 'Lebensmitteltanker', typ: 'Auflieger', bild: 'fi-lebensmitteltanker.png', preisNeu: 95000, preisGebraucht: 60000, level: 6, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], fahrer: ['Tanker'] },
+    { name: 'Gefahrguttanker', typ: 'Auflieger', bild: 'fi-gefahrguttanker.png', preisNeu: 135000, preisGebraucht: 85000, level: 7, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], fahrer: ['Tanker', 'Gefahrgut (ADR)'] },
+    { name: 'Getreidekipper', typ: 'Auflieger', bild: 'fi-getreidekipper.png', preisNeu: 49000, preisGebraucht: 33000, level: 8, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], zulGesamtgewichtT: 36, nutzlastT: 30, leergewichtT: 6 },
+    { name: 'Containerchassis', typ: 'Auflieger', bild: 'fi-containerchassi.png', kapazitaet: '1× 40 Fuß oder 2× 20 Fuß', preisNeu: 25890, preisGebraucht: 15000, level: 9, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], zulGesamtgewichtT: 40, nutzlastT: 36, leergewichtT: 4 },
   ];
 
   function fmtEuroKatalog(n) {
@@ -2844,11 +2850,13 @@
     const style = document.createElement('style');
     style.id = 'fi-haendler-styles';
     style.textContent = `
-      .fi-referenz-karte { border: 1px dashed rgba(255,217,138,.4) !important; opacity: .88; }
-      .fi-referenz-thumb {
-        display: flex; align-items: center; justify-content: center;
-        font-size: 40px; background: rgba(255,255,255,.04); min-height: 120px;
-      }
+      /* .fleet-thumb (echte Klasse) liefert schon Flex/Zentrierung/Padding -
+         .fi-referenz-thumb ergänzt nur den Farbton, die Bildgröße kommt
+         allein aus der Bild-Breite (kein fixes height - das würde bei
+         diesem breiteren 3:2-Wiki-Bild sonst wieder zu groß/verzerrt). */
+      .fi-referenz-karte { border: 1px dashed rgba(255,217,138,.4) !important; opacity: .92; }
+      .fi-referenz-thumb { background: rgba(255,255,255,.04); }
+      .fi-referenz-thumb img { width: 100%; height: auto; display: block; }
       .fi-referenz-badge { background: rgba(255,217,138,.18); color: #ffd98a; }
     `;
     document.head.appendChild(style);
@@ -2873,11 +2881,10 @@
 
     const zeilenHtml = zeilen.map(([l, v]) => `<div><span>${l}</span><strong>${v}</strong></div>`).join('');
     const levelBadge = fz.levelText ?? `Händler ab Level ${fz.level}`;
-    const icon = fz.typ === 'Zugmaschine' ? '🚛' : (fz.typ === 'Anhänger' || fz.typ === 'Auflieger') ? '🚋' : '📦';
 
     return `
       <article class="fleet-card dealer-card is-open fi-referenz-karte">
-        <div class="fleet-thumb fi-referenz-thumb"><span>${icon}</span></div>
+        <div class="fleet-thumb fi-referenz-thumb"><img src="${WIKI_BILD_BASIS}${fz.bild}" alt="${fz.name}" loading="lazy"></div>
         <div class="fleet-main">
           <div class="fleet-title-row">
             <div class="fleet-title"><div class="fleet-name">${fz.name}</div></div>
