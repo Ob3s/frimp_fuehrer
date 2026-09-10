@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.12
+// @version      0.29.13
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.12';
+  const SCRIPT_VERSION = '0.29.13';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2685,6 +2685,124 @@
   }
 
   // ============================================================
+  // 6b. PERSONALBÖRSE (recruitment.php) - BEWERBER AUF EINE ZAHL REDUZIERT
+  //     Die spieleigene "Eignung"-Prozentzahl bewertet nur die QUALITÄT eines
+  //     Bewerbers und ignoriert das Gehalt komplett. Live beobachtet: zwei
+  //     Fahrer-Bewerber (Lena Rossi 85% Eignung, Hakan Kaya 51% Eignung)
+  //     verlangten praktisch dasselbe Gehalt (2.600 € / 2.700 €) - nach
+  //     Eignung allein sieht man diese Ungleichheit nicht. PERSONALWERT holt
+  //     das Gehalt mit rein: Eignungspunkte pro 1.000 € Monatsgehalt. Die
+  //     Einstellgebühr fließt NICHT zusätzlich ein - sie ist live IMMER exakt
+  //     20% des Monatsgehalts (Fahrer wie Disponent), ein fixer Faktor
+  //     ändert nie die Rangfolge zwischen Bewerbern.
+  // ============================================================
+  const PERSONALBOERSE_SELEKTOREN = {
+    karte: 'article.card',
+    name: '.card-head .name',
+    rolle: '.card-head .role',
+    eignung: '.card-head .score strong',
+    fact: '.facts .fact',
+    statBueroLevel: '.stats .stat',
+  };
+
+  /** @returns {{card: Element, name: string|null, rolle: string|null, eignung: number|null, gehalt: number|null, freischaltungLevel: number}} */
+  function parsePersonalKarte(card) {
+    const name = card.querySelector(PERSONALBOERSE_SELEKTOREN.name)?.textContent.trim() ?? null;
+    const rolle = card.querySelector(PERSONALBOERSE_SELEKTOREN.rolle)?.textContent.trim() ?? null;
+    const eignungText = card.querySelector(PERSONALBOERSE_SELEKTOREN.eignung)?.textContent.trim() ?? '';
+    const eignung = eignungText ? parseFloat(eignungText.replace('%', '').replace(',', '.')) : null;
+
+    const facts = {};
+    card.querySelectorAll(PERSONALBOERSE_SELEKTOREN.fact).forEach(f => {
+      const label = f.querySelector('span')?.textContent.trim();
+      const wert = f.querySelector('strong')?.textContent.trim();
+      if (label) facts[label] = wert;
+    });
+    const gehaltText = facts['Monatsgehalt'] ?? '';
+    const gehalt = gehaltText ? parseFloat(gehaltText.replace(/[^\d,-]/g, '').replace(/\./g, '').replace(',', '.')) : null;
+    const freischaltungMatch = (facts['Freischaltung'] ?? '').match(/(\d+)/);
+    const freischaltungLevel = freischaltungMatch ? parseInt(freischaltungMatch[1], 10) : 1;
+
+    return { card, name, rolle, eignung, gehalt, freischaltungLevel };
+  }
+
+  /** @returns {number|null} Eignungspunkte pro 1.000 € Monatsgehalt, oder null falls Eignung/Gehalt fehlt */
+  function berechnePersonalWert(kandidat) {
+    if (kandidat.eignung == null || !kandidat.gehalt) return null;
+    return (kandidat.eignung / kandidat.gehalt) * 1000;
+  }
+
+  function holeAktuellesBueroLevel() {
+    const stat = Array.from(document.querySelectorAll(PERSONALBOERSE_SELEKTOREN.statBueroLevel))
+      .find(el => /Büro-Level/i.test(el.querySelector('span')?.textContent ?? ''));
+    const text = stat?.querySelector('strong')?.textContent ?? '';
+    const n = parseInt(text, 10);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function injectPersonalboerseStyles() {
+    if (document.getElementById('fi-personal-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'fi-personal-styles';
+    style.textContent = `
+      .fi-personal-wert {
+        display: inline-flex; align-items: baseline; gap: 4px;
+        font-size: 11px; font-weight: 700; color: #ffd98a;
+        background: rgba(255,217,138,.12); border-radius: 6px;
+        padding: 2px 8px; margin-top: 6px;
+      }
+      .fi-personal-wert.fi-gesperrt { color: #9aa5b8; background: rgba(154,165,184,.12); }
+      .fi-personal-wert small { font-weight: 600; color: #9aa5b8; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  /**
+   * Baut für jede Bewerber-Karte auf recruitment.php den PERSONALWERT-Badge
+   * und sortiert die Karten im gemeinsamen .grid-Container danach neu (beste
+   * Werte zuerst, noch nicht freigeschaltete Bewerber - Büro-Level zu
+   * niedrig - ans Ende, da ohnehin nicht einstellbar). Läuft einmalig beim
+   * Laden - die Seite lädt bei jedem Filter/Sortierwechsel ohnehin komplett
+   * neu (siehe URL-Query-Parameter ?role=...), kein SPA-Rerendering.
+   */
+  function initPersonalboerseWertung() {
+    const karten = Array.from(document.querySelectorAll(PERSONALBOERSE_SELEKTOREN.karte));
+    if (!karten.length) return;
+    injectPersonalboerseStyles();
+
+    const aktuellesBueroLevel = holeAktuellesBueroLevel();
+    const kandidaten = karten.map(parsePersonalKarte).map(k => ({
+      ...k,
+      wert: berechnePersonalWert(k),
+      gesperrt: aktuellesBueroLevel != null && k.freischaltungLevel > aktuellesBueroLevel,
+    }));
+
+    kandidaten.forEach(k => {
+      const badge = document.createElement('div');
+      badge.className = 'fi-personal-wert' + (k.gesperrt ? ' fi-gesperrt' : '');
+      badge.title = 'Eignungspunkte pro 1.000 € Monatsgehalt - hoher Wert = viel Eignung für wenig Gehalt';
+      badge.textContent = k.wert != null ? `⭐ ${k.wert.toFixed(1)} ` : '⭐ –';
+      const small = document.createElement('small');
+      small.textContent = k.gesperrt ? `🔒 ab Büro-Level ${k.freischaltungLevel}` : '/ 1.000 € Gehalt';
+      badge.appendChild(small);
+      k.card.querySelector(PERSONALBOERSE_SELEKTOREN.fact)?.closest('.facts')?.insertAdjacentElement('afterend', badge)
+        ?? k.card.appendChild(badge);
+    });
+
+    const grid = karten[0].parentElement;
+    kandidaten
+      .slice()
+      .sort((a, b) => {
+        if (a.gesperrt !== b.gesperrt) return a.gesperrt ? 1 : -1;
+        return (b.wert ?? -Infinity) - (a.wert ?? -Infinity);
+      })
+      .forEach(k => grid.appendChild(k.card));
+
+    console.log('[FI-Helper] Personalwert berechnet für', kandidaten.length, 'Bewerber:',
+      kandidaten.map(k => `${k.name} (${k.rolle}): ${k.wert?.toFixed(1) ?? '?'}${k.gesperrt ? ' [gesperrt]' : ''}`));
+  }
+
+  // ============================================================
   // 7. INIT
   // ============================================================
   // Der Helper läuft AUSSCHLIESSLICH als Cockpit auf active_tours.php -
@@ -2696,6 +2814,8 @@
   if (/\/game\/active_tours\.php/.test(location.pathname)) {
     injectZIndexOverrides(); // Basis-Styles (auch für's Dashboard) einmalig einspielen
     renderActiveToursDashboard().catch(e => console.error('[FI-Helper] Dashboard-Aufbau fehlgeschlagen:', e));
+  } else if (/\/game\/recruitment\.php/.test(location.pathname)) {
+    initPersonalboerseWertung();
   }
 
 })();
