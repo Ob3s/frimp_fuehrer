@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.13
+// @version      0.29.14
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.13';
+  const SCRIPT_VERSION = '0.29.14';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2803,6 +2803,129 @@
   }
 
   // ============================================================
+  // 6c. FAHRZEUGHÄNDLER (truck-catalog.php) - FEHLENDE FAHRZEUGE ERGÄNZEN
+  //     Der Händler zeigt nur ein rotierendes Teil-Angebot (z.B. mal nur
+  //     Kleintransporter) - für den vom Nutzer gewünschten Gesamtüberblick
+  //     ergänzt diese Funktion alle 15 laut offiziellem Wiki existierenden
+  //     Fahrzeuge/Anhänger/Sattelzugmaschinen/Auflieger
+  //     (hilfe.frachtimperium.de/books/fuhrpark-fahrzeuge/chapter/fahrzeuge,
+  //     jede Seite hat eine Spec-Grafik mit allen Werten) als zusätzliche
+  //     Kacheln - optisch identisch zu den echten Händler-Kacheln (gleiche
+  //     CSS-Klassen: .fleet-card.dealer-card, .fleet-info, .dealer-price),
+  //     aber klar als "📖 Referenz (Wiki)" markiert und OHNE echte Kaufen/
+  //     Leasen-Formulare (dafür bräuchte es eine echte inventory_id, die es
+  //     für nicht im Angebot befindliche Fahrzeuge nicht gibt - ein Klick
+  //     darf hier NIE einen echten Kauf/Leasing-Request auslösen).
+  // ============================================================
+  const WIKI_FAHRZEUG_KATALOG = [
+    { name: 'Kleintransporter', typ: 'Fahrzeug', aufbau: 'Kleintransporter', tankinhaltLiter: 80, verbrauchLeer: 9.0, verbrauchBeladen: 12.0, preisNeu: 35000, preisGebraucht: 18000, level: 1, fahrer: ['Führerschein B'] },
+    { name: 'Solo-LKW Koffer', typ: 'Fahrzeug', aufbau: 'Koffer', stellplaetze: 18, tankinhaltLiter: 300, verbrauchLeer: 21.0, verbrauchBeladen: 25.0, anhaengerMoeglich: 'Koffer-Anhänger', preisNeu: 95000, preisGebraucht: 55000, level: 2, fahrer: ['Führerschein C', 'Solo-LKW'] },
+    { name: 'Koffer-Anhänger', typ: 'Anhänger', stellplaetze: 18, preisNeu: 38000, preisGebraucht: null, level: 6, koppelbarMit: ['Solo-LKW Koffer'] },
+    { name: 'Solo-LKW Kühlkoffer', typ: 'Fahrzeug', aufbau: 'Kühlkoffer', stellplaetze: 18, tankinhaltLiter: 300, verbrauchLeer: 24.0, verbrauchBeladen: 28.0, anhaengerMoeglich: 'Kühler-Anhänger', preisNeu: 125000, preisGebraucht: 75000, level: 3, fahrer: ['Führerschein C', 'Solo-LKW', 'Kühlung'] },
+    { name: 'Kühler-Anhänger', typ: 'Anhänger', stellplaetze: 18, preisNeu: 46000, preisGebraucht: null, level: 7, koppelbarMit: ['Solo-LKW Kühlkoffer'], fahrer: ['Kühlung'] },
+    { name: 'Solo-LKW Plane', typ: 'Fahrzeug', aufbau: 'Plane', stellplaetze: 18, tankinhaltLiter: 300, verbrauchLeer: 19.0, verbrauchBeladen: 24.0, anhaengerMoeglich: 'Plane Anhänger', preisNeu: null, preisGebraucht: null, levelText: 'Nur durch das Tutorial' },
+    { name: 'Plane Anhänger', typ: 'Anhänger', stellplaetze: 18, preisNeu: 34000, preisGebraucht: null, level: 10, koppelbarMit: ['Solo-LKW Plane'] },
+    { name: 'Standard-Sattelzugmaschine', typ: 'Zugmaschine', tankinhaltLiter: 600, verbrauchLeer: 25.0, verbrauchBeladen: 32.0, preisNeu: 135000, preisGebraucht: 75000, level: 4, fahrer: ['Führerschein CE', 'SZM'], koppelbarMit: ['Tautliner/Plane', 'Kühlauflieger', 'Lebensmitteltanker', 'Gefahrguttanker', 'Containerchassis', 'Getreidekipper'] },
+    { name: 'Premium-Sattelzugmaschine', typ: 'Zugmaschine', tankinhaltLiter: 1200, verbrauchLeer: 19.0, verbrauchBeladen: 24.0, preisNeu: 185000, preisGebraucht: 115000, level: 5, fahrer: ['Führerschein CE', 'SZM'], koppelbarMit: ['Tautliner/Plane', 'Kühlauflieger', 'Lebensmitteltanker', 'Gefahrguttanker', 'Containerchassis', 'Getreidekipper'] },
+    { name: 'Tautliner/Plane', typ: 'Auflieger', stellplaetze: 34, preisNeu: 42000, preisGebraucht: 24000, level: 4, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'] },
+    { name: 'Kühlauflieger', typ: 'Auflieger', stellplaetze: 33, preisNeu: 72000, preisGebraucht: 44000, level: 5, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], fahrer: ['Kühlung'] },
+    { name: 'Lebensmitteltanker', typ: 'Auflieger', preisNeu: 95000, preisGebraucht: 60000, level: 6, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], fahrer: ['Tanker'] },
+    { name: 'Gefahrguttanker', typ: 'Auflieger', preisNeu: 135000, preisGebraucht: 85000, level: 7, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], fahrer: ['Tanker', 'Gefahrgut (ADR)'] },
+    { name: 'Getreidekipper', typ: 'Auflieger', preisNeu: 49000, preisGebraucht: 33000, level: 8, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], zulGesamtgewichtT: 36, nutzlastT: 30, leergewichtT: 6 },
+    { name: 'Containerchassis', typ: 'Auflieger', kapazitaet: '1× 40 Fuß oder 2× 20 Fuß', preisNeu: 25890, preisGebraucht: 15000, level: 9, koppelbarMit: ['Standard-Sattelzugmaschine', 'Premium-Sattelzugmaschine'], zulGesamtgewichtT: 40, nutzlastT: 36, leergewichtT: 4 },
+  ];
+
+  function fmtEuroKatalog(n) {
+    return n == null ? '–' : n.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+  }
+
+  function injectFahrzeughaendlerStyles() {
+    if (document.getElementById('fi-haendler-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'fi-haendler-styles';
+    style.textContent = `
+      .fi-referenz-karte { border: 1px dashed rgba(255,217,138,.4) !important; opacity: .88; }
+      .fi-referenz-thumb {
+        display: flex; align-items: center; justify-content: center;
+        font-size: 40px; background: rgba(255,255,255,.04); min-height: 120px;
+      }
+      .fi-referenz-badge { background: rgba(255,217,138,.18); color: #ffd98a; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function baueReferenzKarteHtml(fz) {
+    const zeilen = [];
+    if (fz.aufbau) zeilen.push(['Aufbau', fz.aufbau]);
+    if (fz.stellplaetze != null) zeilen.push(['Palettenstellplätze', String(fz.stellplaetze)]);
+    if (fz.kapazitaet) zeilen.push(['Kapazität', fz.kapazitaet]);
+    if (fz.tankinhaltLiter != null) zeilen.push(['Tankinhalt', `${fz.tankinhaltLiter} L`]);
+    if (fz.verbrauchLeer != null) zeilen.push(['Verbrauch leer', `${fz.verbrauchLeer.toFixed(2)} L / 100 km`]);
+    if (fz.verbrauchBeladen != null) zeilen.push(['Verbrauch beladen', `${fz.verbrauchBeladen.toFixed(2)} L / 100 km`]);
+    if (fz.typ === 'Zugmaschine') zeilen.push(['Auflieger nötig', 'Ja']);
+    if (fz.anhaengerMoeglich) zeilen.push(['Anhänger möglich', fz.anhaengerMoeglich]);
+    if (fz.zulGesamtgewichtT != null) zeilen.push(['Zul. Gesamtgewicht', `${fz.zulGesamtgewichtT} t`]);
+    if (fz.nutzlastT != null) zeilen.push(['Nutzlast', `${fz.nutzlastT} t`]);
+    if (fz.koppelbarMit) zeilen.push(['Koppelbar mit', fz.koppelbarMit.join(', ')]);
+    if (fz.fahrer?.length) zeilen.push(['Fahrer-Spezialisierung', fz.fahrer.join(' + ')]);
+    zeilen.push(['Preis Neu', fmtEuroKatalog(fz.preisNeu)]);
+    if (fz.preisGebraucht !== undefined) zeilen.push(['Preis Gebraucht', fmtEuroKatalog(fz.preisGebraucht)]);
+
+    const zeilenHtml = zeilen.map(([l, v]) => `<div><span>${l}</span><strong>${v}</strong></div>`).join('');
+    const levelBadge = fz.levelText ?? `Händler ab Level ${fz.level}`;
+    const icon = fz.typ === 'Zugmaschine' ? '🚛' : (fz.typ === 'Anhänger' || fz.typ === 'Auflieger') ? '🚋' : '📦';
+
+    return `
+      <article class="fleet-card dealer-card is-open fi-referenz-karte">
+        <div class="fleet-thumb fi-referenz-thumb"><span>${icon}</span></div>
+        <div class="fleet-main">
+          <div class="fleet-title-row">
+            <div class="fleet-title"><div class="fleet-name">${fz.name}</div></div>
+            <div class="fleet-status">
+              <span class="badge">${fz.typ}</span>
+              <span class="badge fi-referenz-badge">📖 Referenz (Wiki)</span>
+              <span class="badge">${levelBadge}</span>
+            </div>
+          </div>
+          <div class="dealer-bottom">
+            <div class="mini-note">Aktuell nicht im Angebot des Händlers - Werte aus dem Wiki, kein Kauf/Leasing möglich.</div>
+          </div>
+          <div class="dealer-info">
+            <div class="fleet-info">${zeilenHtml}</div>
+          </div>
+        </div>
+      </article>`;
+  }
+
+  /**
+   * Ergänzt alle Fahrzeugtypen, die der Händler GERADE NICHT im Angebot hat
+   * (Vergleich per Fahrzeugname gegen die tatsächlich angezeigten Karten),
+   * als Referenz-Kacheln aus WIKI_FAHRZEUG_KATALOG. Respektiert den
+   * "Fahrzeuge"/"Auflieger"-Filter der Seite (URL-Parameter ?type=...) -
+   * der "Nur neu"/"Nur gebraucht"-Filter wird bewusst ignoriert, da er auf
+   * echte Lagerbestände zielt und auf Referenz-Kacheln ohnehin nicht passt.
+   */
+  function ergaenzeFehlendeFahrzeuge() {
+    const grid = document.querySelector('.dealer-grid');
+    if (!grid) return;
+
+    const vorhandene = new Set(Array.from(grid.querySelectorAll('.fleet-name')).map(el => el.textContent.trim()));
+    const typFilter = new URLSearchParams(location.search).get('type');
+    const passtZuFilter = fz => {
+      if (typFilter === 'vehicle') return fz.typ === 'Fahrzeug' || fz.typ === 'Zugmaschine';
+      if (typFilter === 'trailer') return fz.typ === 'Anhänger' || fz.typ === 'Auflieger';
+      return true;
+    };
+
+    const fehlende = WIKI_FAHRZEUG_KATALOG.filter(fz => !vorhandene.has(fz.name) && passtZuFilter(fz));
+    if (!fehlende.length) return;
+
+    injectFahrzeughaendlerStyles();
+    grid.insertAdjacentHTML('beforeend', fehlende.map(baueReferenzKarteHtml).join(''));
+    console.log(`[FI-Helper] ${fehlende.length} Referenz-Kachel(n) ergänzt (nicht im aktuellen Händler-Angebot):`, fehlende.map(f => f.name));
+  }
+
+  // ============================================================
   // 7. INIT
   // ============================================================
   // Der Helper läuft AUSSCHLIESSLICH als Cockpit auf active_tours.php -
@@ -2816,6 +2939,8 @@
     renderActiveToursDashboard().catch(e => console.error('[FI-Helper] Dashboard-Aufbau fehlgeschlagen:', e));
   } else if (/\/game\/recruitment\.php/.test(location.pathname)) {
     initPersonalboerseWertung();
+  } else if (/\/game\/truck-catalog\.php/.test(location.pathname)) {
+    ergaenzeFehlendeFahrzeuge();
   }
 
 })();
