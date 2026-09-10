@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.15
+// @version      0.29.16
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.15';
+  const SCRIPT_VERSION = '0.29.16';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2855,6 +2855,14 @@
          allein aus der Bild-Breite (kein fixes height - das würde bei
          diesem breiteren 3:2-Wiki-Bild sonst wieder zu groß/verzerrt). */
       .fi-referenz-karte { border: 1px dashed rgba(255,217,138,.4) !important; opacity: .92; }
+      /* WICHTIG: die echte .is-open-Klasse (nötig, damit .dealer-info sichtbar
+         ist - ohne sie steht es auf display:none) bringt beim echten Händler
+         auch "grid-column: span 2" mit (Karte wird beim Aufklappen doppelt so
+         breit, damit die Detail-Tabelle Platz hat). Für unsere Referenz-
+         Kacheln, die IMMER offen sind, wollen wir aber die normale 1-Spalten-
+         Breite - deshalb hier gezielt zurückgesetzt (siehe Chat: Nutzer hat
+         die doppelte Breite zu Recht bemängelt). */
+      .fi-referenz-karte.is-open { grid-column: auto !important; }
       .fi-referenz-thumb { background: rgba(255,255,255,.04); }
       .fi-referenz-thumb img { width: 100%; height: auto; display: block; }
       .fi-referenz-badge { background: rgba(255,217,138,.18); color: #ffd98a; }
