@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.18
+// @version      0.29.19
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.18';
+  const SCRIPT_VERSION = '0.29.19';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -1038,6 +1038,193 @@
   }
 
   /**
+   * Baut für JEDE im Datensatz vorkommende Route (exakter Start→Ziel) eine
+   * einzelne "Etappe" - ggf. schon ein Bündel aus mehreren Teilladungen
+   * (gleiche Greedy-Packstrategie wie baueBundlesFuerAlleRouten, aber auch
+   * für nur 1 Auftrag, da eine Etappe allein schon eine gültige Kette von
+   * Länge 1 ist). Grundlage für die Mehrstufige-Ketten-Suche unten.
+   * @returns {Map<string, {startOrt, zielOrt, frachten: FrachtAngebot[], verguetungGesamt: number, stellplaetzeGesamt: number, entfernungKm: number, fruehesteFrist: Date|null}>}
+   */
+  function baueLegsProRoute(angebote, fahrzeugStellplaetze) {
+    const legs = new Map();
+    if (!fahrzeugStellplaetze) return legs;
+
+    const gruppenNachRoute = new Map();
+    angebote.forEach(f => {
+      if (!f.startOrt || !f.zielOrt || f.startOrt === f.zielOrt) return;
+      if (f.kapazitaet !== 'Teilladung') return; // Komplettladungen laufen schon als Einzel-Kandidat
+      if (!f.stellplaetzeBenoetigt) return;
+      const key = `${f.startOrt}→${f.zielOrt}`;
+      if (!gruppenNachRoute.has(key)) gruppenNachRoute.set(key, []);
+      gruppenNachRoute.get(key).push(f);
+    });
+
+    gruppenNachRoute.forEach((frachtenAufRoute, key) => {
+      const sortiertNachDichte = [...frachtenAufRoute].sort(
+        (a, b) => (b.verguetungEuro / b.stellplaetzeBenoetigt) - (a.verguetungEuro / a.stellplaetzeBenoetigt)
+      );
+      const gepackt = [];
+      let belegteStellplaetze = 0;
+      for (const f of sortiertNachDichte) {
+        if (belegteStellplaetze + f.stellplaetzeBenoetigt <= fahrzeugStellplaetze) {
+          gepackt.push(f);
+          belegteStellplaetze += f.stellplaetzeBenoetigt;
+        }
+      }
+      if (gepackt.length === 0) return;
+      const erste = gepackt[0];
+      legs.set(key, {
+        startOrt: erste.startOrt,
+        zielOrt: erste.zielOrt,
+        frachten: gepackt,
+        verguetungGesamt: gepackt.reduce((s, f) => s + (f.verguetungEuro ?? 0), 0),
+        stellplaetzeGesamt: belegteStellplaetze,
+        entfernungKm: erste.entfernungKm ?? 0,
+        fruehesteFrist: gepackt.reduce((min, f) => {
+          if (!f.lieferfrist) return min;
+          return (!min || f.lieferfrist < min) ? f.lieferfrist : min;
+        }, null),
+      });
+    });
+
+    return legs;
+  }
+
+  /**
+   * Verkettet Leg-Kandidaten zu Mehrstufigen Ketten (2 bis maxEtappen Etappen):
+   * jede Folge-Etappe muss exakt an der Zielstadt der vorherigen anschließen -
+   * live im Tourenplaner bestätigt (siehe Chat, ZM01+Auflieger-Test): mehrere
+   * angenommene Teilladungen lassen sich über Belade-/Entladereihenfolge frei
+   * zu EINER Tour kombinieren, ohne Leerkilometer zwischen Abladen und
+   * Neu-Beladen an derselben Stadt. Tiefensuche ab JEDEM Leg als Kettenstart,
+   * um auch Ketten zu finden, die nicht an der aktuellen Fahrzeugposition
+   * beginnen (die Anfahrt zur ersten Etappe wird separat bewertet).
+   * @param {Map} legsProRoute Rückgabe von baueLegsProRoute
+   * @param {number} maxEtappen Obergrenze gegen Kombinatorik-Explosion
+   */
+  function baueMehrstufigeKetten(legsProRoute, maxEtappen = 3) {
+    const legsAbStadt = new Map();
+    legsProRoute.forEach(leg => {
+      if (!legsAbStadt.has(leg.startOrt)) legsAbStadt.set(leg.startOrt, []);
+      legsAbStadt.get(leg.startOrt).push(leg);
+    });
+
+    const ketten = [];
+    function erweitere(pfad, besuchteStaedte) {
+      if (pfad.length >= 2) ketten.push([...pfad]);
+      if (pfad.length >= maxEtappen) return;
+      const letzteStadt = pfad[pfad.length - 1].zielOrt;
+      (legsAbStadt.get(letzteStadt) || []).forEach(leg => {
+        if (besuchteStaedte.has(leg.zielOrt)) return; // keine Zyklen
+        pfad.push(leg);
+        besuchteStaedte.add(leg.zielOrt);
+        erweitere(pfad, besuchteStaedte);
+        besuchteStaedte.delete(leg.zielOrt);
+        pfad.pop();
+      });
+    }
+    legsProRoute.forEach(startLeg => {
+      erweitere([startLeg], new Set([startLeg.startOrt, startLeg.zielOrt]));
+    });
+    return ketten;
+  }
+
+  /**
+   * Generalisiert bewerteKetteFuerFahrzeug auf eine beliebige Anzahl Etappen.
+   * Anfahrt nur EINMAL vor der ersten Etappe, danach schließt jede weitere
+   * Etappe nahtlos an (kein Leerkilometer). Jede Etappe braucht ihre EIGENE
+   * Fristen-Prüfung gegen ihre jeweils früheste Lieferfrist (bei gebündelten
+   * Etappen: die früheste aller enthaltenen Aufträge).
+   */
+  function bewerteMehrstufigeKetteFuerFahrzeug(etappen, vehicleStatus, liveStatus, aufbauTypLabel, fahrzeugStellplaetze) {
+    if (!vehicleStatus?.freiAbOrt || !vehicleStatus?.freiAbZeit) return null;
+    const erste = etappen[0];
+    if (!erste.startOrt) return null;
+    if (fahrzeugStellplaetze != null) {
+      for (const etappe of etappen) {
+        if (etappe.stellplaetzeGesamt > fahrzeugStellplaetze) return null;
+      }
+    }
+
+    const anfahrtKm = geschaetzteStrassenKm(vehicleStatus.freiAbOrt, erste.startOrt);
+    if (anfahrtKm === null) return null;
+
+    const fahreranzahl = liveStatus?.drivers?.length >= 2 ? 2 : 1;
+    const restLenkzeitStunden = liveStatus?.drivers?.[0]?.remaining_drive_seconds != null
+      ? liveStatus.drivers[0].remaining_drive_seconds / 3600 : null;
+    const restSchichtzeitStunden = liveStatus?.drivers?.[0]?.remaining_shift_seconds != null
+      ? liveStatus.drivers[0].remaining_shift_seconds / 3600 : null;
+    const lenkzeitUngeprueft = restLenkzeitStunden === null || restSchichtzeitStunden === null;
+
+    const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
+    const ladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
+    const entladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
+    const geschwindigkeit = ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
+
+    const anfahrtSegment = [{ dauer: anfahrtKm / geschwindigkeit, istFahrt: true }];
+    let lauf = simuliereTourZeitplan(anfahrtSegment, fahreranzahl, restLenkzeitStunden, restSchichtzeitStunden);
+    const beladungsStartZeit = new Date(vehicleStatus.freiAbZeit.getTime() + lauf.gesamtStunden * 3600 * 1000);
+    let uhrzeit = beladungsStartZeit;
+
+    let gesamtStunden = lauf.gesamtStunden;
+    let anzahlSchichtpausen = lauf.anzahlSchichtpausen;
+    let gesamtFahrtKm = 0;
+    let schaffbarGesamt = true;
+    let alleFristenUnbekannt = true;
+    const etappenErgebnisse = [];
+
+    for (const etappe of etappen) {
+      const fahrtKm = etappe.entfernungKm ?? 0;
+      const segmente = [
+        { dauer: ladeZeitStunden, istFahrt: false },
+        { dauer: fahrtKm / geschwindigkeit, istFahrt: true },
+        { dauer: entladeZeitStunden, istFahrt: false },
+      ];
+      lauf = simuliereTourZeitplan(segmente, fahreranzahl, lauf.restPflichtpause, lauf.restSchichtzeit);
+      uhrzeit = new Date(uhrzeit.getTime() + lauf.gesamtStunden * 3600 * 1000);
+      gesamtStunden += lauf.gesamtStunden;
+      anzahlSchichtpausen += lauf.anzahlSchichtpausen;
+      gesamtFahrtKm += fahrtKm;
+      const schaffbar = etappe.fruehesteFrist ? uhrzeit <= etappe.fruehesteFrist : null;
+      if (schaffbar !== null) alleFristenUnbekannt = false;
+      if (schaffbar === false) schaffbarGesamt = false;
+      etappenErgebnisse.push({ ankunftZeit: uhrzeit, schaffbar, startOrt: etappe.startOrt, zielOrt: etappe.zielOrt });
+    }
+
+    const ankunftZeit = uhrzeit;
+    const schaffbar = !schaffbarGesamt ? false : (alleFristenUnbekannt ? null : true);
+
+    const lenkzeitHinweis = anzahlSchichtpausen > 0
+      ? `${anzahlSchichtpausen}x Schichtpause (${LENKZEIT_REGELN[fahreranzahl].schichtpauseStunden}h, ${fahreranzahl} Fahrer) über ${etappen.length} Etappen eingerechnet`
+      : null;
+
+    const mautSatz = spezifikation.mautProKm ?? MAUT_SATZ_DEFAULT;
+    const kostenAnfahrt = anfahrtKm * (dieselKostenProKm(false, spezifikation) + mautSatz);
+    const kostenFahrten = gesamtFahrtKm * (dieselKostenProKm(true, spezifikation) + mautSatz);
+    const verguetungGesamt = etappen.reduce((s, e) => s + (e.verguetungGesamt ?? 0), 0);
+    const deckungsbeitragEuro = verguetungGesamt - kostenAnfahrt - kostenFahrten;
+
+    const gesamtFahrKm = anfahrtKm + gesamtFahrtKm;
+    const effektivProKm = gesamtFahrKm > 0 ? deckungsbeitragEuro / gesamtFahrKm : null;
+    const anfahrtAnteilProzent = gesamtFahrKm > 0 ? Math.round((anfahrtKm / gesamtFahrKm) * 100) : null;
+
+    const planungsfensterEnde = new Date(Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000);
+    const einplanbar = beladungsStartZeit <= planungsfensterEnde;
+    const einplanbarHinweis = einplanbar
+      ? null
+      : `Nächstmöglicher Beladungsstart (${beladungsStartZeit.toLocaleString('de-DE')}) liegt außerhalb des ${PLANUNGSFENSTER_STUNDEN}h-Planungsfensters (Fenster endet ${planungsfensterEnde.toLocaleString('de-DE')}) - noch nicht einplanbar, erst annehmen und später einplanen`;
+
+    return {
+      anfahrtKm, gesamtStunden, ankunftZeit, schaffbar, effektivProKm, deckungsbeitragEuro,
+      kostenAnfahrt, anfahrtAnteilProzent, beladungsStartZeit,
+      lenkzeitHinweis, lenkzeitUngeprueft,
+      kapazitaetOk: true, kapazitaetHinweis: null,
+      einplanbar, einplanbarHinweis,
+      etappenErgebnisse,
+    };
+  }
+
+  /**
    * Findet für jedes Fahrzeug das beste (schaffbare) Angebot aus einer Angebotsliste.
    * @param {FrachtAngebot[]} angebote
    * @param {{name: string, status: VehicleStatus, live: Object|null, typ: string}[]} fleet
@@ -1139,7 +1326,34 @@
             .filter(x => x.bewertung !== null)
         : [];
 
-      const bewertungen = [...einzelBewertungen, ...bundleBewertungen, ...kettenBewertungen];
+      // Mehrstufige Ketten (2-3 Etappen, je Etappe ggf. schon gebündelt) -
+      // anders als die einfache 2-Etappen-Kette oben läuft das IMMER, nicht
+      // nur bei Rückfracht-Suche, da jede Etappe ihre eigene Anfahrt-Basis
+      // hat und nicht an der aktuellen Fahrzeugposition hängen muss.
+      const legsProRoute = baueLegsProRoute(angebote, fahrzeug.stellplaetze ?? null);
+      const mehrstufigeKettenBewertungen = baueMehrstufigeKetten(legsProRoute, 3)
+        .filter(etappen => !zielReferenzStadt || filtereNachZielstadt([{ zielOrt: etappen[etappen.length - 1].zielOrt }], zielReferenzStadt, zielRadiusKm).length > 0)
+        .map(etappen => {
+          const bewertung = bewerteMehrstufigeKetteFuerFahrzeug(etappen, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null);
+          if (bewertung && direktKm) {
+            const gesamtFahrKm = bewertung.anfahrtKm + etappen.reduce((s, e) => s + (e.entfernungKm ?? 0), 0);
+            bewertung.umwegProzent = Math.round(((gesamtFahrKm / direktKm) - 1) * 100);
+          }
+          const virtuelleFracht = {
+            startOrt: etappen[0].startOrt,
+            zielOrt: etappen[etappen.length - 1].zielOrt,
+            entfernungKm: etappen.reduce((s, e) => s + (e.entfernungKm ?? 0), 0),
+            verguetungEuro: etappen.reduce((s, e) => s + (e.verguetungGesamt ?? 0), 0),
+            frachtName: etappen.map(e => `${e.startOrt}→${e.zielOrt}`).join(' + '),
+            lieferfrist: etappen[etappen.length - 1].fruehesteFrist,
+            jobId: null, // wird über die Einzel-Aufträge jeder Etappe angenommen, nicht als ein Klick
+            preisProKm: null,
+          };
+          return { fracht: virtuelleFracht, bewertung, istMehrstufigeKette: true, etappen };
+        })
+        .filter(x => x.bewertung !== null);
+
+      const bewertungen = [...einzelBewertungen, ...bundleBewertungen, ...kettenBewertungen, ...mehrstufigeKettenBewertungen];
 
       // Fristen-Einhaltung bleibt eine WEICHE Präferenz - lieber eine knapp
       // verpasste Frist zeigen als gar nichts, das ist informativ statt gefährlich.
@@ -1172,6 +1386,7 @@
     if (!eintrag) return [];
     if (eintrag.istBundle) return eintrag.bundleFrachten.map(f => f.jobId).filter(Boolean);
     if (eintrag.istKette) return [eintrag.kette.etappe1.jobId, eintrag.kette.etappe2.jobId].filter(Boolean);
+    if (eintrag.istMehrstufigeKette) return eintrag.etappen.flatMap(e => e.frachten.map(f => f.jobId)).filter(Boolean);
     return eintrag.fracht.jobId ? [eintrag.fracht.jobId] : [];
   }
 
@@ -2514,7 +2729,7 @@
             if (!eintrag.beste) {
               html += `<div class="fi-dash-row fi-warn">Keine bewertbare Fracht (Stadt evtl. nicht in Koordinatentabelle).</div>`;
             } else {
-              const { fracht, bewertung, istBundle, bundleFrachten, istKette, kette } = eintrag.beste;
+              const { fracht, bewertung, istBundle, bundleFrachten, istKette, kette, istMehrstufigeKette, etappen } = eintrag.beste;
               const schaffbarIcon = bewertung.schaffbar === true ? '✅' : bewertung.schaffbar === false ? '❌' : '❔';
               const schaffbarKlasse = bewertung.schaffbar === true ? 'fi-good' : bewertung.schaffbar === false ? 'fi-bad' : 'fi-warn';
               const schaffbarText = bewertung.schaffbar === true ? 'Frist einhaltbar' : bewertung.schaffbar === false ? 'Frist NICHT einhaltbar' : 'Frist unbekannt';
@@ -2528,8 +2743,12 @@
               if (istKette) {
                 html += `<div class="fi-dash-row fi-loc">🔗 <strong>Kette über ${kette.zwischenstadt}</strong> (2 Etappen)</div>`;
               }
+              if (istMehrstufigeKette) {
+                const gesamtAuftraege = etappen.reduce((s, e) => s + e.frachten.length, 0);
+                html += `<div class="fi-dash-row fi-loc">🔗📦 <strong>Mehrstufige Kette</strong> (${etappen.length} Etappen, ${gesamtAuftraege} Aufträge, ohne Leerkilometer zwischen den Etappen)</div>`;
+              }
               html += `<div class="fi-dash-row"><strong>${fracht.startOrt} → ${fracht.zielOrt}</strong> (${fracht.entfernungKm ?? '?'} km)</div>`;
-              html += `<div class="fi-dash-row fi-muted">${istBundle ? `${bundleFrachten.length} Aufträge` : istKette ? '2 Etappen' : fracht.frachtName} · ${fmtEuro(fracht.verguetungEuro ?? 0)}${istBundle || istKette ? ' gesamt' : ''}</div>`;
+              html += `<div class="fi-dash-row fi-muted">${istBundle ? `${bundleFrachten.length} Aufträge` : (istKette || istMehrstufigeKette) ? `${etappen ? etappen.length : 2} Etappen` : fracht.frachtName} · ${fmtEuro(fracht.verguetungEuro ?? 0)}${istBundle || istKette || istMehrstufigeKette ? ' gesamt' : ''}</div>`;
               if (istBundle) {
                 bundleFrachten.forEach(f => {
                   html += `<div class="fi-dash-bundle-item">↳ ${f.frachtName} · ${f.stellplaetzeBenoetigt} Stpl. · ${fmtEuro(f.verguetungEuro ?? 0)}</div>`;
@@ -2538,6 +2757,16 @@
               if (istKette) {
                 html += `<div class="fi-dash-bundle-item">↳ Etappe 1: ${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt} · ${kette.etappe1.entfernungKm} km · ${fmtEuro(kette.etappe1.verguetungEuro ?? 0)}${bewertung.zwischenankunft ? ' · Ankunft dort: ' + bewertung.zwischenankunft.toLocaleString('de-DE') : ''}${bewertung.etappe1Schaffbar === false ? ' ❌ Frist verpasst' : ''}</div>`;
                 html += `<div class="fi-dash-bundle-item">↳ Etappe 2: ${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt} · ${kette.etappe2.entfernungKm} km · ${fmtEuro(kette.etappe2.verguetungEuro ?? 0)}${bewertung.etappe2Schaffbar === false ? ' ❌ Frist verpasst' : ''}</div>`;
+              }
+              if (istMehrstufigeKette) {
+                etappen.forEach((etappe, i) => {
+                  const ergebnis = bewertung.etappenErgebnisse?.[i];
+                  const bündelHinweis = etappe.frachten.length > 1 ? ` (Bündel aus ${etappe.frachten.length} Teilladungen)` : '';
+                  html += `<div class="fi-dash-bundle-item">↳ Etappe ${i + 1}: ${etappe.startOrt} → ${etappe.zielOrt} · ${etappe.entfernungKm} km · ${etappe.stellplaetzeGesamt} Stpl.${bündelHinweis} · ${fmtEuro(etappe.verguetungGesamt ?? 0)}${ergebnis ? ' · Ankunft dort: ' + ergebnis.ankunftZeit.toLocaleString('de-DE') : ''}${ergebnis?.schaffbar === false ? ' ❌ Frist verpasst' : ''}</div>`;
+                  etappe.frachten.forEach(f => {
+                    html += `<div class="fi-dash-bundle-item" style="padding-left:24px;">↳↳ ${f.frachtName} · ${f.stellplaetzeBenoetigt} Stpl. · ${fmtEuro(f.verguetungEuro ?? 0)}</div>`;
+                  });
+                });
               }
               html += `<div class="fi-dash-row ${bewertung.anfahrtAnteilProzent > 40 ? 'fi-warn' : 'fi-loc'}">🚫 Leerfahrt: ~${Math.round(bewertung.anfahrtKm)} km${bewertung.anfahrtAnteilProzent != null ? ` (${bewertung.anfahrtAnteilProzent}% der Gesamtstrecke)` : ''}${bewertung.kostenAnfahrt != null ? ` · ${fmtEuro(bewertung.kostenAnfahrt)} Kosten` : ''}</div>`;
               if (bewertung.umwegProzent != null) {
@@ -2558,6 +2787,13 @@
                 html += `<div class="fi-dash-row fi-muted" style="font-size:11px;">ℹ Beide Etappen einzeln annehmen, dann nacheinander einplanen (automatisches Verketten unterstütze ich noch nicht):</div>`;
                 html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${kette.etappe1.jobId}" data-route="${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt}">✅ Etappe 1 annehmen</button>`;
                 html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${kette.etappe2.jobId}" data-route="${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt}">✅ Etappe 2 annehmen</button>`;
+              } else if (istMehrstufigeKette) {
+                html += `<div class="fi-dash-row fi-muted" style="font-size:11px;">ℹ Alle Aufträge einzeln annehmen, dann im Tourenplaner unter "${etappen[0].startOrt} → ${etappen[etappen.length - 1].zielOrt}"-Kategorie zusammen auswählen - Belade-/Entladereihenfolge in der Reihenfolge der Etappen oben setzen:</div>`;
+                etappen.forEach(etappe => {
+                  etappe.frachten.forEach(f => {
+                    html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${f.jobId}" data-route="${f.startOrt} → ${f.zielOrt}">✅ ${f.frachtName} annehmen</button>`;
+                  });
+                });
               } else if (!bewertung.einplanbar && fracht.jobId) {
                 html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${fracht.jobId}" data-route="${fracht.startOrt} → ${fracht.zielOrt}">✅ Nur annehmen</button>`;
               } else if (fracht.jobId && eintrag.vehicleId && eintrag.freiAbZeit) {
