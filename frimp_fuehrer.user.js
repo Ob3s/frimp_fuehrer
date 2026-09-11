@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.17
+// @version      0.29.18
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.17';
+  const SCRIPT_VERSION = '0.29.18';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -85,6 +85,7 @@
 
     // --- Seite: Fuhrpark-Übersicht (fuhrpark.php) ---
     fuhrparkCard: '.fleet-card',                      // ein Artikel pro Fahrzeug, data-vehicle-id
+    fuhrparkAufliegerCard: '.fleet-card.is-trailer',   // Auflieger: eigene Karte, KEINE data-vehicle-id, aber dasselbe .fleet-plate-Kennzeichen wie die gekoppelte Zugmaschine
     fuhrparkTypBild: '.fleet-thumb img',               // alt-Attribut = Fahrzeugtyp, z.B. "Kleintransporter"
     fuhrparkName: '.fleet-name',
     fuhrparkKennzeichen: '.fleet-plate',
@@ -749,8 +750,8 @@
     const lenkzeitUngeprueft = restLenkzeitStunden === null || restSchichtzeitStunden === null;
 
     const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
-    const ladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl);
-    const entladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl);
+    const ladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
+    const entladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
     const geschwindigkeit = ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
 
     // Anfahrt ZUERST separat simulieren: der Beladungsstart ist freiAbZeit +
@@ -957,8 +958,8 @@
     const lenkzeitUngeprueft = restLenkzeitStunden === null || restSchichtzeitStunden === null;
 
     const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
-    const ladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl);
-    const entladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl);
+    const ladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
+    const entladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
     const geschwindigkeit = ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
 
     // Etappe 1: Anfahrt zuerst SEPARAT simulieren, um den echten Beladungsstart
@@ -1089,7 +1090,7 @@
 
       const einzelBewertungen = angeboteFuerDirekt
         .map(fracht => {
-          const bewertung = bewerteFrachtFuerFahrzeug(fracht, fahrzeug.status, fahrzeug.live, fahrzeug.typ, fahrzeug.stellplaetze ?? null);
+          const bewertung = bewerteFrachtFuerFahrzeug(fracht, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null);
           if (bewertung && direktKm) {
             const gesamtFahrKm = bewertung.anfahrtKm + (fracht.entfernungKm ?? 0);
             bewertung.umwegProzent = Math.round(((gesamtFahrKm / direktKm) - 1) * 100);
@@ -1101,7 +1102,7 @@
       const bundleBewertungen = baueBundlesFuerAlleRouten(angeboteFuerDirekt, fahrzeug.stellplaetze ?? null)
         .map(bundleFrachten => {
           const { fracht, bewertung } = bewerteBundleFuerFahrzeug(
-            bundleFrachten, fahrzeug.status, fahrzeug.live, fahrzeug.typ, fahrzeug.stellplaetze ?? null
+            bundleFrachten, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null
           );
           if (bewertung && direktKm) {
             const gesamtFahrKm = bewertung.anfahrtKm + (fracht.entfernungKm ?? 0);
@@ -1117,7 +1118,7 @@
       const kettenBewertungen = zielReferenzStadt
         ? baueKettenKandidaten(angebote, zielReferenzStadt, zielRadiusKm)
             .map(kette => {
-              const bewertung = bewerteKetteFuerFahrzeug(kette, fahrzeug.status, fahrzeug.live, fahrzeug.typ, fahrzeug.stellplaetze ?? null);
+              const bewertung = bewerteKetteFuerFahrzeug(kette, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null);
               if (bewertung && direktKm) {
                 const gesamtFahrKm = bewertung.anfahrtKm + (kette.etappe1.entfernungKm ?? 0) + (kette.etappe2.entfernungKm ?? 0);
                 bewertung.umwegProzent = Math.round(((gesamtFahrKm / direktKm) - 1) * 100);
@@ -1282,6 +1283,26 @@
       stellplaetzeGesamt: 18,
       mautProKm: MAUT_SATZ_DEFAULT, // live bestätigt, auch auf einer Route ganz ohne Polen (Hamburg -> Kuopio)
     },
+    // Sattelzugmaschinen ziehen NUR einen Auflieger und haben selbst keine
+    // Ladefläche/Stellplätze (siehe Chat) - deshalb hier bewusst KEIN
+    // stellplaetzeGesamt. Die echte Stellplatzzahl kommt live vom
+    // gekoppelten Auflieger (siehe parseFuhrparkDetails/fahrzeugStellplaetze)
+    // und wird in berechneLadeZeitStunden bevorzugt genutzt. Werte aus dem
+    // Truck-Katalog/Wiki, noch nicht an einer echten Tour verifiziert.
+    'Standard-Sattelzugmaschine': {
+      tankinhaltLiter: 600,
+      verbrauchLeerLPro100km: 25.0,
+      verbrauchBeladenLPro100km: 32.0,
+      ladeSystem: 'palette',
+      mautProKm: MAUT_SATZ_DEFAULT,
+    },
+    'Premium-Sattelzugmaschine': {
+      tankinhaltLiter: 1200,
+      verbrauchLeerLPro100km: 19.0,
+      verbrauchBeladenLPro100km: 24.0,
+      ladeSystem: 'palette',
+      mautProKm: MAUT_SATZ_DEFAULT,
+    },
   };
 
   /**
@@ -1332,12 +1353,16 @@
    * ANNAHME bei Palette-Fahrzeugen: "Komplettladung" nutzt die VOLLE
    * Stellplatzzahl des Fahrzeugs - die Frachtbörse zeigt uns die exakte
    * Stellplatzzahl pro Auftrag aktuell nicht.
+   * @param {number|null} fahrzeugStellplaetze Echte, live gelesene Stellplatzzahl
+   *   (bei Sattelzug-Kombis vom gekoppelten Auflieger, z.B. 34) - hat Vorrang
+   *   vor dem statischen spezifikation.stellplaetzeGesamt, das für solche
+   *   Kombis gar nicht gepflegt ist (siehe FAHRZEUG_SPEZIFIKATIONEN).
    */
-  function berechneLadeZeitStunden(spezifikation, fahreranzahl) {
+  function berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze = null) {
     if (spezifikation.ladeSystem === 'fix') {
       return spezifikation.ladeZeitFixStunden;
     }
-    const stellplaetze = spezifikation.stellplaetzeGesamt ?? 0;
+    const stellplaetze = fahrzeugStellplaetze ?? spezifikation.stellplaetzeGesamt ?? 0;
     const rohMinuten = 10 + 1.5 * stellplaetze;
     const gerundetMinuten = Math.round(rohMinuten / 5) * 5;
     const mindestMinuten = fahreranzahl >= 2 ? 10 : 15;
@@ -1353,14 +1378,35 @@
    * - ob mindestens ein Fahrer zugewiesen ist (ohne Fahrer taucht das
    *   Fahrzeug NICHT in der Disposition auf und wird von uns sonst nirgends
    *   erfasst - das war der Grund für "mein neuer LKW wird nicht berücksichtigt")
-   * @returns {Map<string, {typ: string, stellplaetze: number|null, hatFahrer: boolean}>}
+   * - bei einer Sattelzugmaschine mit gekoppeltem Auflieger zusätzlich den
+   *   ECHTEN Auflieger-Typ (siehe frachtKategorie unten - live verifiziert an
+   *   "ZM 01"/"PL 02": Zugmaschine und Auflieger sind zwei EIGENE
+   *   .fleet-card-Elemente mit identischem .fleet-plate-Kennzeichen, aber nur
+   *   die Zugmaschine hat eine data-vehicle-id; der Auflieger taucht in
+   *   dispatch.php gar nicht separat auf - für uns bleibt es EIN Fahrzeug,
+   *   wie vom Nutzer gewünscht, nur mit zwei Spezifikations-Quellen: Diesel/
+   *   Maut/Ladezeit richten sich nach der Zugmaschine (typ), die
+   *   Frachtbörsen-Kompatibilität nach dem Auflieger (frachtKategorie).
+   * @returns {Map<string, {typ: string, frachtKategorie: string|null, stellplaetze: number|null, hatFahrer: boolean}>}
    */
   function parseFuhrparkDetails(root = document) {
+    // Auflieger haben keine eigene data-vehicle-id, aber dasselbe Kennzeichen
+    // wie die Zugmaschine, an die sie gekoppelt sind - darüber lässt sich der
+    // richtige Aufbau-Typ für die Frachtbörsen-Suche finden.
+    const aufliegerTypNachKennzeichen = new Map();
+    root.querySelectorAll(SELECTORS.fuhrparkAufliegerCard).forEach(card => {
+      const kennzeichen = card.querySelector(SELECTORS.fuhrparkKennzeichen)?.textContent.trim();
+      const typ = card.querySelector(SELECTORS.fuhrparkTypBild)?.getAttribute('alt')?.trim();
+      if (kennzeichen && typ) aufliegerTypNachKennzeichen.set(kennzeichen, typ);
+    });
+
     const details = new Map();
     root.querySelectorAll(SELECTORS.fuhrparkCard).forEach(card => {
       const vehicleId = card.dataset.vehicleId;
       if (!vehicleId) return;
       const typ = card.querySelector(SELECTORS.fuhrparkTypBild)?.getAttribute('alt')?.trim() || null;
+      const kennzeichen = card.querySelector(SELECTORS.fuhrparkKennzeichen)?.textContent.trim();
+      const frachtKategorie = (kennzeichen && aufliegerTypNachKennzeichen.get(kennzeichen)) || null;
 
       let stellplaetze = null;
       let hatFahrer = false;
@@ -1376,7 +1422,7 @@
         }
       });
 
-      details.set(vehicleId, { typ, stellplaetze, hatFahrer });
+      details.set(vehicleId, { typ, frachtKategorie, stellplaetze, hatFahrer });
     });
     return details;
   }
@@ -2401,10 +2447,17 @@
         ]);
         const fleet = fleetMitLive.map(f => {
           const details = f.status?.vehicleId ? detailsMap.get(String(f.status.vehicleId)) : null;
+          // Bei Sattelzug-Kombis kommt die Frachtbörsen-Kategorie vom
+          // gekoppelten Auflieger (frachtKategorie), NICHT vom Zugmaschinen-
+          // Modell - "welche Zugmaschine welchen Auflieger zieht, spielt
+          // keine Rolle" (siehe Chat). Ohne Auflieger (frachtKategorie
+          // null) bleibt es wie bisher beim eigenen Fahrzeugtyp.
+          const typ = normalisiereFahrzeugtyp(details?.frachtKategorie || details?.typ) || kategorieLabel;
           return {
             ...f,
-            typ: normalisiereFahrzeugtyp(details?.typ) || kategorieLabel,
-            stellplaetze: details?.stellplaetze ?? holeFahrzeugSpezifikation(details?.typ || kategorieLabel).stellplaetzeGesamt ?? null,
+            typ,
+            verbrauchsTyp: normalisiereFahrzeugtyp(details?.typ) || typ,
+            stellplaetze: details?.stellplaetze ?? holeFahrzeugSpezifikation(details?.frachtKategorie || details?.typ || kategorieLabel).stellplaetzeGesamt ?? null,
           };
         });
 
