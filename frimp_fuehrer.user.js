@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.20
+// @version      0.29.21
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.20';
+  const SCRIPT_VERSION = '0.29.21';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2165,20 +2165,6 @@
         font-weight: 700;
         z-index: 3;
       }
-      .fi-dash-timeline-need-banner {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-bottom: 12px;
-        padding: 8px 12px;
-        border: 1px solid rgba(255,92,92,.4);
-        border-radius: 8px;
-        background: rgba(255,92,92,.08);
-        color: #ffb0b0;
-        font-size: 13px;
-        font-weight: 700;
-      }
-
       /* ====== Eigenes Tooltip-System - JETZT per JS mit position:fixed
          (siehe initFiTooltipSystem), NICHT mehr per CSS :hover::after.
          Grund: ein CSS-Tooltip als Kind-Pseudoelement wird von JEDEM
@@ -2582,13 +2568,7 @@
           ? `${naechsterPlanungsbedarf.zeit.toLocaleString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} · ${naechsterPlanungsbedarf.name}`
           : '';
 
-        let timelineHtml = '';
-        if (naechsterPlanungsbedarf) {
-          timelineHtml += `<div class="fi-dash-timeline-need-banner">⏰ Nächster Planungsbedarf: <strong>${naechsterPlanungsbedarf.name}</strong> steht ab
-            <strong>${naechsterPlanungsbedarf.zeit.toLocaleString('de-DE')}</strong>${naechsterPlanungsbedarf.ort ? ` in <strong>${naechsterPlanungsbedarf.ort}</strong>` : ''}
-            ohne geplante Tour da - spätestens dann brauchst du eine neue Fracht.</div>`;
-        }
-        timelineHtml += `<div class="fi-dash-timeline-legend">
+        let timelineHtml = `<div class="fi-dash-timeline-legend">
           <span><i style="background:#5b9bd5;"></i>Leerfahrt</span>
           <span><i style="background:#d4a94a;"></i>Laden / Entladen</span>
           <span><i style="background:#4caf7d;"></i>Fahrt beladen</span>
