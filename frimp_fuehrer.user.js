@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.19
+// @version      0.29.20
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.19';
+  const SCRIPT_VERSION = '0.29.20';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2145,6 +2145,12 @@
         background: rgba(255,255,255,.07);
       }
       .fi-dash-timeline-gridline.is-day { background: rgba(255,217,138,.20); width: 1px; }
+      .fi-dash-timeline-gridline.is-need {
+        background: #ff5c5c;
+        width: 2px;
+        z-index: 3;
+        box-shadow: 0 0 4px rgba(255,92,92,.6);
+      }
       .fi-dash-timeline-tick {
         position: absolute;
         top: 0;
@@ -2154,6 +2160,24 @@
         color: #9aa5b8;
       }
       .fi-dash-timeline-tick.is-day { color: #ffd98a; font-weight: 700; }
+      .fi-dash-timeline-tick.is-need {
+        color: #ff5c5c;
+        font-weight: 700;
+        z-index: 3;
+      }
+      .fi-dash-timeline-need-banner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 12px;
+        padding: 8px 12px;
+        border: 1px solid rgba(255,92,92,.4);
+        border-radius: 8px;
+        background: rgba(255,92,92,.08);
+        color: #ffb0b0;
+        font-size: 13px;
+        font-weight: 700;
+      }
 
       /* ====== Eigenes Tooltip-System - JETZT per JS mit position:fixed
          (siehe initFiTooltipSystem), NICHT mehr per CSS :hover::after.
@@ -2253,13 +2277,22 @@
    * Fensters liegen, werden ans Fenster geclippt. Jeder Balken hat einen
    * eigenen, sofort erscheinenden Tooltip mit Route/Zeit/Auftrag (data-fi-tip).
    */
-  function baueTimelineTrackHtml(phasen, fensterStartMs, fensterEndeMs) {
+  function baueTimelineTrackHtml(phasen, fensterStartMs, fensterEndeMs, markerMs = null) {
     const fensterDauerMs = fensterEndeMs - fensterStartMs;
     let html = '';
 
     baueZeitAchsenTicks(fensterStartMs, fensterEndeMs).forEach(tick => {
       html += `<div class="fi-dash-timeline-gridline${tick.istMitternacht ? ' is-day' : ''}" style="left:${tick.pct.toFixed(2)}%"></div>`;
     });
+
+    // Roter Marker: frühester Zeitpunkt, ab dem IRGENDEIN Fahrzeug der Flotte
+    // ohne geplante Tour dastehen würde (siehe Chat) - auf JEDER Fahrzeugzeile
+    // an derselben Stelle gezeichnet, damit es wie eine durchgehende Linie
+    // über die ganze Flotte wirkt.
+    if (markerMs != null && markerMs >= fensterStartMs && markerMs <= fensterEndeMs) {
+      const markerPct = ((markerMs - fensterStartMs) / fensterDauerMs) * 100;
+      html += `<div class="fi-dash-timeline-gridline is-need" style="left:${markerPct.toFixed(2)}%"></div>`;
+    }
 
     (phasen || []).forEach(p => {
       if (!p.start || !p.ende) return;
@@ -2292,12 +2325,17 @@
    * Baut die Kopfzeile mit Uhrzeit-Beschriftung über allen Fahrzeug-Spuren
    * (an derselben Spaltenbreite ausgerichtet wie die Timeline-Zeilen selbst).
    */
-  function baueTimelineKopfzeileHtml(fensterStartMs, fensterEndeMs) {
+  function baueTimelineKopfzeileHtml(fensterStartMs, fensterEndeMs, markerMs = null, markerLabel = '') {
     const ticks = baueZeitAchsenTicks(fensterStartMs, fensterEndeMs);
-    const tickHtml = ticks.map(t => `<div class="fi-dash-timeline-tick${t.istMitternacht ? ' is-day' : ''}" style="left:${t.pct.toFixed(2)}%">${t.label}</div>`).join('');
+    let tickHtml = ticks.map(t => `<div class="fi-dash-timeline-tick${t.istMitternacht ? ' is-day' : ''}" style="left:${t.pct.toFixed(2)}%">${t.label}</div>`).join('');
+    if (markerMs != null && markerMs >= fensterStartMs && markerMs <= fensterEndeMs) {
+      const fensterDauerMs = fensterEndeMs - fensterStartMs;
+      const markerPct = ((markerMs - fensterStartMs) / fensterDauerMs) * 100;
+      tickHtml += `<div class="fi-dash-timeline-tick is-need" style="left:${markerPct.toFixed(2)}%; top:-16px;">⏰ ${markerLabel}</div>`;
+    }
     return `<div class="fi-dash-timeline-row" style="margin-bottom:4px;">
       <div class="fi-dash-timeline-label"></div>
-      <div class="fi-dash-timeline-track" style="height:20px; background:none; border:none;">${tickHtml}</div>
+      <div class="fi-dash-timeline-track" style="height:20px; background:none; border:none; overflow:visible;">${tickHtml}</div>
     </div>`;
   }
 
@@ -2526,11 +2564,36 @@
       if (timelineEl) {
         const fensterStartMs = Date.now();
         const fensterEndeMs = fensterStartMs + 48 * 3600 * 1000; // 48h-Fenster ab jetzt
-        let timelineHtml = `<div class="fi-dash-timeline-legend">
+
+        // Frühester Zeitpunkt, ab dem IRGENDEIN Fahrzeug ohne geplante Tour
+        // dastehen würde ("Ende der Planung" ist bereits das Ende des GESAMTEN
+        // bekannten Plans, nicht nur der aktuellen Phase, siehe parseCurrentVehicleStatus) -
+        // das ist genau der Zeitpunkt, ab dem spätestens neu disponiert werden muss.
+        let naechsterPlanungsbedarf = null;
+        fleet.forEach(entry => {
+          const zeit = entry.status?.freiAbZeit;
+          if (!zeit) return;
+          if (!naechsterPlanungsbedarf || zeit < naechsterPlanungsbedarf.zeit) {
+            naechsterPlanungsbedarf = { zeit, name: entry.name, ort: entry.status.freiAbOrt };
+          }
+        });
+        const markerMs = naechsterPlanungsbedarf ? naechsterPlanungsbedarf.zeit.getTime() : null;
+        const markerLabel = naechsterPlanungsbedarf
+          ? `${naechsterPlanungsbedarf.zeit.toLocaleString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} · ${naechsterPlanungsbedarf.name}`
+          : '';
+
+        let timelineHtml = '';
+        if (naechsterPlanungsbedarf) {
+          timelineHtml += `<div class="fi-dash-timeline-need-banner">⏰ Nächster Planungsbedarf: <strong>${naechsterPlanungsbedarf.name}</strong> steht ab
+            <strong>${naechsterPlanungsbedarf.zeit.toLocaleString('de-DE')}</strong>${naechsterPlanungsbedarf.ort ? ` in <strong>${naechsterPlanungsbedarf.ort}</strong>` : ''}
+            ohne geplante Tour da - spätestens dann brauchst du eine neue Fracht.</div>`;
+        }
+        timelineHtml += `<div class="fi-dash-timeline-legend">
           <span><i style="background:#5b9bd5;"></i>Leerfahrt</span>
           <span><i style="background:#d4a94a;"></i>Laden / Entladen</span>
           <span><i style="background:#4caf7d;"></i>Fahrt beladen</span>
           <span><i style="background:#c1554a;"></i>Pause / Schichtpause</span>
+          <span><i style="background:#ff5c5c;"></i>Nächster Planungsbedarf</span>
         </div>`;
 
         if (!fleet.length) {
@@ -2539,13 +2602,13 @@
           // Ein einzelner Fetch (mit ?date=heute, siehe fetchVehicleStatus)
           // liefert bereits eine ganze Woche an Tagen - kein Mehrfach-Nachladen
           // mehr nötig (das hat vorher nur Duplikate erzeugt, siehe Chat).
-          timelineHtml += baueTimelineKopfzeileHtml(fensterStartMs, fensterEndeMs);
+          timelineHtml += baueTimelineKopfzeileHtml(fensterStartMs, fensterEndeMs, markerMs, markerLabel);
           fleet.forEach(entry => {
             const vehicleId = entry.status?.vehicleId;
             const labelInhalt = vehicleId
               ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}">🚐 ${entry.name}</a>`
               : `🚐 ${entry.name}`;
-            const trackInhalt = baueTimelineTrackHtml(entry.status?.phasen, fensterStartMs, fensterEndeMs);
+            const trackInhalt = baueTimelineTrackHtml(entry.status?.phasen, fensterStartMs, fensterEndeMs, markerMs);
             timelineHtml += `<div class="fi-dash-timeline-row">
               <div class="fi-dash-timeline-label">${labelInhalt}</div>
               <div class="fi-dash-timeline-track">${trackInhalt}</div>
