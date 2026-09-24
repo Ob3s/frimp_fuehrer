@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.22
+// @version      0.29.23
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.22';
+  const SCRIPT_VERSION = '0.29.23';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2377,6 +2377,39 @@
    */
   const marktScanCache = new Map();
   const MARKT_CACHE_TTL_MS = 10 * 60 * 1000; // 10 Minuten, danach gilt der Cache als abgelaufen
+  const MARKT_CACHE_STORAGE_PREFIX = 'fi_markt_cache_v1_';
+
+  /**
+   * Der Scan-Cache überlebt jetzt auch Seitenwechsel (die reine Map im
+   * Speicher ging bei jeder Navigation verloren -> alles wurde neu abgerufen).
+   * Lesen: erst Speicher, dann localStorage; Datumsfelder werden wiederhergestellt.
+   */
+  function holeMarktCache(schluessel) {
+    const imSpeicher = marktScanCache.get(schluessel);
+    if (imSpeicher) return imSpeicher;
+    try {
+      const roh = window.localStorage.getItem(MARKT_CACHE_STORAGE_PREFIX + schluessel);
+      if (!roh) return null;
+      const eintrag = JSON.parse(roh, (k, v) => (k === 'lieferfrist' && typeof v === 'string' ? new Date(v) : v));
+      marktScanCache.set(schluessel, eintrag);
+      return eintrag;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function speichereMarktCache(schluessel, eintrag) {
+    marktScanCache.set(schluessel, eintrag);
+    try {
+      window.localStorage.setItem(MARKT_CACHE_STORAGE_PREFIX + schluessel, JSON.stringify(eintrag));
+    } catch (e) {
+      // Kontingent voll: alte Markt-Caches verwerfen und einmal neu versuchen, sonst nur im Speicher halten
+      try {
+        Object.keys(window.localStorage).filter(k => k.startsWith(MARKT_CACHE_STORAGE_PREFIX)).forEach(k => window.localStorage.removeItem(k));
+        window.localStorage.setItem(MARKT_CACHE_STORAGE_PREFIX + schluessel, JSON.stringify(eintrag));
+      } catch (e2) { /* nur im Speicher */ }
+    }
+  }
 
   /**
    * Cache für Daten, die sich erfahrungsgemäß selten ändern (Fuhrpark-
@@ -2444,7 +2477,6 @@
       <h3>Tourenplan – alle Fahrzeuge auf einen Blick</h3>
       <div id="fi-dash-timeline"><div class="fi-empty">Lade Tourenplan …</div></div>
 
-      <h3>Flotte</h3>
       <div id="fi-dash-fleet" class="fi-dash-grid"><div class="fi-empty">Lade Flotte …</div></div>
 
       <h3>Frachtbörse – beste Routen berechnen</h3>
@@ -2457,7 +2489,7 @@
           <label><input type="checkbox" id="fi-dash-only-return"> Zurück zur Firma</label>
           <select id="fi-dash-return-vehicle" class="fi-dash-select" style="min-width:160px; display:none;"></select>
         </div>
-        <div class="fi-dash-field">
+        <div class="fi-dash-field" id="fi-dash-radius-field" style="display:none;">
           <label>Umkreis (km)</label>
           <input type="number" id="fi-dash-return-radius" value="30" min="0" max="500" class="fi-dash-select" style="min-width:80px;" title="0 = nur exakte Stadt, sonst z.B. 30km für Vororte wie Potsdam bei Berlin">
         </div>
@@ -2466,6 +2498,9 @@
         <div class="fi-dash-field">
           <label>Min. effektiv €/km</label>
           <input type="number" id="fi-dash-autofill-min" value="2" min="0" step="0.1" class="fi-dash-select" style="min-width:80px;" title="Aufträge unter diesem Netto-€/km werden beim Befüllen ignoriert">
+        </div>
+        <div class="fi-dash-field">
+          <label><input type="checkbox" id="fi-dash-autofill-dry" checked> Trockenlauf (nichts buchen)</label>
         </div>
         <button type="button" id="fi-dash-autofill-btn" class="fi-dash-btn" title="Nimmt für ALLE Fahrzeuge fortlaufend die besten Komplettladungen an und plant sie ein, bis das Planungsfenster voll ist">⚡ Alle Fahrzeuge befüllen</button>
       </div>
@@ -2541,32 +2576,9 @@
         </div>`;
       }
 
-      for (const entry of fleet) {
-        const live = entry.status?.vehicleId ? await fetchLiveDriverStatus(entry.status.vehicleId, entry.name) : null;
-        const vehicleId = entry.status?.vehicleId;
-        const titel = vehicleId
-          ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;">🚐 ${entry.name}</a>`
-          : `<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;">🚐 ${entry.name}</span>`;
-        html += `<div class="fi-dash-card"><div class="fi-dash-card-title">${titel}<span class="fi-badge-status">${entry.status?.rohStatus ?? 'unbekannt'}</span></div>`;
-        if (entry.status?.freiAbOrt) {
-          html += `<div class="fi-dash-row fi-loc">📍 frei ab ${entry.status.freiAbZeit ? entry.status.freiAbZeit.toLocaleString('de-DE') : '?'} in <strong>${entry.status.freiAbOrt}</strong></div>`;
-        }
-        if (live?.drivers?.length) {
-          live.drivers.forEach(d => {
-            html += `<div class="fi-dash-row">👤 ${d.name}${d.is_driving_now ? ' <span class="fi-dash-row fi-good" style="display:inline; margin:0;">(fährt)</span>' : ''}</div>`;
-          });
-        }
-        const leerfahrten = entry.status?.phasen?.filter(p => p.type === 'leerfahrt') ?? [];
-        if (leerfahrten.length) {
-          const details = leerfahrten
-            .map(p => `${p.von || '?'} → ${p.bis || '?'} (${p.start ? p.start.toLocaleString('de-DE') : '?'} – ${p.ende ? p.ende.toLocaleString('de-DE') : '?'})`)
-            .join('\n');
-          html += `<div class="fi-dash-row fi-warn" data-fi-tip="${details.replace(/"/g, '&quot;')}">⚠ ${leerfahrten.length} Leerfahrt(en) geplant (Hover für Details)</div>`;
-        }
-        html += `</div>`;
-      }
-
-      fleetEl.innerHTML = html || '<div class="fi-empty">Keine Fahrzeuge gefunden.</div>';
+      // Die einzelnen Fahrzeugkarten sind auf Wunsch entfallen (die Timeline zeigt
+      // alles); übrig bleibt nur die Warnung für Fahrzeuge ohne Fahrer.
+      fleetEl.innerHTML = html;
 
       // --- Timeline: alle Fahrzeuge auf einen Blick (wie der spieleigene
       // Dispositionsplan, nur alle Fahrzeuge übereinander statt einzeln) ---
@@ -2667,6 +2679,7 @@
     befuelleReturnVehicleSelect();
     onlyReturnCb.addEventListener('change', () => {
       returnVehicleSelect.style.display = onlyReturnCb.checked ? '' : 'none';
+      document.getElementById('fi-dash-radius-field').style.display = onlyReturnCb.checked ? '' : 'none';
       if (onlyReturnCb.checked) befuelleReturnVehicleSelect();
     });
 
@@ -2706,7 +2719,7 @@
         // Datensatz) - Ziel-Filterung und Ketten-Bildung passieren komplett
         // clientseitig in findeBesteRoutenProFahrzeug aus EINEM Scan.
         const cacheKey = marktCacheSchluessel(bodyType);
-        const cacheEintrag = marktScanCache.get(cacheKey);
+        const cacheEintrag = holeMarktCache(cacheKey);
         const cacheIstFrisch = cacheEintrag && (Date.now() - cacheEintrag.zeitstempel) < MARKT_CACHE_TTL_MS;
 
         let marktErgebnis;
@@ -2716,7 +2729,7 @@
           ausCache = true;
         } else {
           marktErgebnis = await fetchAllOffersForBodyType(bodyType, 20, status => { resultsEl.innerHTML = `<div class="fi-empty">${status}</div>`; });
-          marktScanCache.set(cacheKey, { ...marktErgebnis, zeitstempel: Date.now() });
+          speichereMarktCache(cacheKey, { ...marktErgebnis, zeitstempel: Date.now() });
         }
 
         const fleetRoh = await fetchFleetStatus();
@@ -2891,7 +2904,8 @@
       }
       const minEuroProKm = parseFloat(autofillMinInput.value);
       const minWert = Number.isFinite(minEuroProKm) ? minEuroProKm : 2;
-      const bestaetigt = window.confirm(
+      const trocken = document.getElementById('fi-dash-autofill-dry').checked;
+      const bestaetigt = trocken || window.confirm(
         `ALLE Fahrzeuge automatisch befüllen?\n\n` +
         `Das Skript nimmt fortlaufend die jeweils beste Komplettladung (mind. ${minWert} €/km effektiv, Frist einhaltbar) ` +
         `für jedes Fahrzeug VERBINDLICH an und plant sie ein, bis das Planungsfenster voll ist.\n\n` +
@@ -2917,8 +2931,11 @@
           options,
           log,
           abgebrochen: () => autofillAbbruch,
+          trocken,
         });
-        log(`<strong>Fertig:</strong> ${ergebnis.anzahlAngenommen} Aufträge angenommen &amp; eingeplant · ${fmtEuro(ergebnis.summeEuro)} Vergütung`, 'fi-good');
+        log(trocken
+          ? `<strong>Trockenlauf fertig:</strong> ${ergebnis.anzahlAngenommen} Aufträge würden gebucht · ${fmtEuro(ergebnis.summeEuro)} Vergütung (nichts wurde gebucht)`
+          : `<strong>Fertig:</strong> ${ergebnis.anzahlAngenommen} Aufträge angenommen &amp; eingeplant · ${fmtEuro(ergebnis.summeEuro)} Vergütung`, 'fi-good');
       } catch (e) {
         console.error('[FI-Helper] Automatisches Befüllen fehlgeschlagen', e);
         log(`Fehler: ${e.message}`, 'fi-bad');
@@ -2942,8 +2959,9 @@
    * den Tourenplaner, dessen Request noch nicht erfasst ist.
    * @param {{minEuroProKm: number, options: {value: string, label: string}[], log: Function, abgebrochen: Function}} param
    */
-  async function befuelleFlotteAutomatisch({ minEuroProKm, options, log, abgebrochen }) {
+  async function befuelleFlotteAutomatisch({ minEuroProKm, options, log, abgebrochen, trocken = false }) {
     const MAX_RUNDEN = 15;
+    let simulierteFlotte = null;
     let anzahlAngenommen = 0;
     let summeEuro = 0;
 
@@ -2961,19 +2979,27 @@
     for (let runde = 1; runde <= MAX_RUNDEN; runde++) {
       if (abgebrochen()) { log('⏹ Vom Nutzer gestoppt.', 'fi-warn'); break; }
 
-      const fleetRoh = await fetchFleetStatus();
-      const [fleetMitLive, detailsMap] = await Promise.all([
-        Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null }))),
-        fetchFuhrparkDetails(true),
-      ]);
-      const fleet = baueFleetMitTyp(fleetMitLive, detailsMap, null)
-        .filter(f => f.typ && f.status?.vehicleId && f.status?.freiAbOrt && f.status?.freiAbZeit);
+      // Trockenlauf: Fahrzeugstand nur EINMAL laden und danach lokal
+      // fortschreiben (nichts wird gebucht, "frei ab" wandert virtuell).
+      let fleet;
+      if (trocken && simulierteFlotte) {
+        fleet = simulierteFlotte;
+      } else {
+        const fleetRoh = await fetchFleetStatus();
+        const [fleetMitLive, detailsMap] = await Promise.all([
+          Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null }))),
+          fetchFuhrparkDetails(true),
+        ]);
+        fleet = baueFleetMitTyp(fleetMitLive, detailsMap, null)
+          .filter(f => f.typ && f.status?.vehicleId && f.status?.freiAbOrt && f.status?.freiAbZeit);
+        if (trocken) simulierteFlotte = fleet;
+      }
 
       // Sicherheitsnetz: hat ein zuletzt beplantes Fahrzeug sein "frei ab"
       // NICHT nach hinten verschoben, wurde der Auftrag zwar angenommen, aber
       // nicht wirklich eingeplant - sofort abbrechen statt weitere Aufträge
       // ins Leere anzunehmen.
-      const nichtVerschoben = fleet.filter(f => {
+      const nichtVerschoben = trocken ? [] : fleet.filter(f => {
         const vorher = letztesFreiAb.get(String(f.status.vehicleId));
         return vorher != null && f.status.freiAbZeit.getTime() <= vorher;
       });
@@ -3024,11 +3050,18 @@
         const fahrzeugName = z.eintrag.fahrzeugName;
         const freiAbVorher = z.eintrag.freiAbZeit;
         try {
-          await nimmFrachtAnUndPlaneEin(fracht.jobId, z.eintrag.vehicleId, freiAbVorher);
+          const beschreibung = `${fahrzeugName}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2)} €/km effektiv · Beladung ab ${bewertung.beladungsStartZeit.toLocaleString('de-DE')} · Ankunft ${bewertung.ankunftZeit.toLocaleString('de-DE')}`;
+          if (trocken) {
+            const f = fleet.find(x => String(x.status.vehicleId) === String(z.eintrag.vehicleId));
+            f.status = { ...f.status, freiAbZeit: bewertung.ankunftZeit, freiAbOrt: fracht.zielOrt };
+            log(`🧪 ${beschreibung}`, 'fi-good');
+          } else {
+            await nimmFrachtAnUndPlaneEin(fracht.jobId, z.eintrag.vehicleId, freiAbVorher);
+            letztesFreiAb.set(String(z.eintrag.vehicleId), freiAbVorher.getTime());
+            log(`✅ ${beschreibung}`, 'fi-good');
+          }
           anzahlAngenommen++;
           summeEuro += fracht.verguetungEuro ?? 0;
-          letztesFreiAb.set(String(z.eintrag.vehicleId), freiAbVorher.getTime());
-          log(`✅ ${fahrzeugName}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2)} €/km effektiv · Ankunft ${bewertung.ankunftZeit.toLocaleString('de-DE')}`, 'fi-good');
         } catch (e) {
           log(`❌ ${fahrzeugName}: ${fracht.startOrt} → ${fracht.zielOrt} fehlgeschlagen: ${e.message}`, 'fi-bad');
           console.error('[FI-Helper] Befüllen: Fehler bei', fracht, e);
