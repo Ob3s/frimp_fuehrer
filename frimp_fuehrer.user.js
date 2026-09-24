@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.23
+// @version      0.29.24
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.23';
+  const SCRIPT_VERSION = '0.29.24';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3017,7 +3017,13 @@
 
         if (!marktPools.has(label)) {
           log(`Scanne Frachtbörse "${label}" …`);
-          const markt = await fetchAllOffersForBodyType(option.value, 20, () => {});
+          let markt = holeMarktCache(marktCacheSchluessel(option.value));
+          if (markt && (Date.now() - markt.zeitstempel) < MARKT_CACHE_TTL_MS) {
+            log(`"${label}" aus dem Cache (vor ${Math.round((Date.now() - markt.zeitstempel) / 60000)} Min. geladen).`);
+          } else {
+            markt = await fetchAllOffersForBodyType(option.value, 20, () => {});
+            speichereMarktCache(marktCacheSchluessel(option.value), { ...markt, zeitstempel: Date.now() });
+          }
           const pool = filtereNachAufbau(markt.angebote, label).filter(a => a.kapazitaet === 'Komplettladung' && a.jobId);
           marktPools.set(label, pool);
           log(`${pool.length} Komplettladungen für "${label}" gefunden.`);
