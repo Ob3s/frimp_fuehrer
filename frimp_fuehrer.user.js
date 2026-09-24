@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.24
+// @version      0.29.25
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.24';
+  const SCRIPT_VERSION = '0.29.25';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2585,7 +2585,7 @@
       const timelineEl = document.getElementById('fi-dash-timeline');
       if (timelineEl) {
         const fensterStartMs = Date.now();
-        const fensterEndeMs = fensterStartMs + 48 * 3600 * 1000; // 48h-Fenster ab jetzt
+        let fensterEndeMs = fensterStartMs + 48 * 3600 * 1000; // 48h-Fenster ab jetzt (ggf. verlängert, s.u.)
 
         // Frühester Zeitpunkt, ab dem IRGENDEIN Fahrzeug ohne geplante Tour
         // dastehen würde ("Ende der Planung" ist bereits das Ende des GESAMTEN
@@ -2599,7 +2599,15 @@
             naechsterPlanungsbedarf = { zeit, name: entry.name, ort: entry.status.freiAbOrt };
           }
         });
-        const markerMs = naechsterPlanungsbedarf ? naechsterPlanungsbedarf.zeit.getTime() : null;
+        // Der Marker darf nie aus dem Fenster fallen: liegt der früheste Planungsbedarf
+        // hinter den 48h (typisch, wenn alle Fahrzeuge bis ans Planungsfenster
+        // verplant sind), wird das Fenster bis kurz dahinter verlängert; liegt er
+        // schon in der Vergangenheit (Fahrzeug steht bereits), sitzt er am linken Rand.
+        let markerMs = naechsterPlanungsbedarf ? naechsterPlanungsbedarf.zeit.getTime() : null;
+        if (markerMs != null) {
+          if (markerMs > fensterEndeMs) fensterEndeMs = Math.min(markerMs + 4 * 3600 * 1000, fensterStartMs + 120 * 3600 * 1000);
+          if (markerMs < fensterStartMs) markerMs = fensterStartMs;
+        }
         const markerLabel = naechsterPlanungsbedarf
           ? `${naechsterPlanungsbedarf.zeit.toLocaleString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} · ${naechsterPlanungsbedarf.name}`
           : '';
