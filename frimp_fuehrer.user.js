@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.21
+// @version      0.29.22
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.21';
+  const SCRIPT_VERSION = '0.29.22';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2325,6 +2325,25 @@
     </div>`;
   }
 
+  /**
+   * Ergänzt jedes Flotten-Element um typ (Frachtbörsen-Kategorie), verbrauchsTyp
+   * und Stellplätze. Bei Sattelzug-Kombis kommt die Kategorie vom gekoppelten
+   * Auflieger (frachtKategorie), NICHT vom Zugmaschinen-Modell; ohne Auflieger
+   * bleibt es beim eigenen Fahrzeugtyp. fallbackLabel greift, wenn nichts erkannt wurde.
+   */
+  function baueFleetMitTyp(fleetMitLive, detailsMap, fallbackLabel) {
+    return fleetMitLive.map(f => {
+      const details = f.status?.vehicleId ? detailsMap.get(String(f.status.vehicleId)) : null;
+      const typ = normalisiereFahrzeugtyp(details?.frachtKategorie || details?.typ) || fallbackLabel;
+      return {
+        ...f,
+        typ,
+        verbrauchsTyp: normalisiereFahrzeugtyp(details?.typ) || typ,
+        stellplaetze: details?.stellplaetze ?? holeFahrzeugSpezifikation(details?.frachtKategorie || details?.typ || fallbackLabel).stellplaetzeGesamt ?? null,
+      };
+    });
+  }
+
   function fmtEuro(n) {
     return n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
   }
@@ -2444,6 +2463,11 @@
         </div>
         <button type="button" id="fi-dash-load-btn" class="fi-dash-btn">Beste Routen berechnen</button>
         <button type="button" id="fi-dash-reload-btn" class="fi-dash-btn-reload" title="Cache umgehen und frisch laden">🔄</button>
+        <div class="fi-dash-field">
+          <label>Min. effektiv €/km</label>
+          <input type="number" id="fi-dash-autofill-min" value="2" min="0" step="0.1" class="fi-dash-select" style="min-width:80px;" title="Aufträge unter diesem Netto-€/km werden beim Befüllen ignoriert">
+        </div>
+        <button type="button" id="fi-dash-autofill-btn" class="fi-dash-btn" title="Nimmt für ALLE Fahrzeuge fortlaufend die besten Komplettladungen an und plant sie ein, bis das Planungsfenster voll ist">⚡ Alle Fahrzeuge befüllen</button>
       </div>
       <div id="fi-dash-results" class="fi-dash-grid"></div>
     `;
@@ -2703,21 +2727,7 @@
           Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null }))),
           fetchFuhrparkDetails(erzwingeNeuladen),
         ]);
-        const fleet = fleetMitLive.map(f => {
-          const details = f.status?.vehicleId ? detailsMap.get(String(f.status.vehicleId)) : null;
-          // Bei Sattelzug-Kombis kommt die Frachtbörsen-Kategorie vom
-          // gekoppelten Auflieger (frachtKategorie), NICHT vom Zugmaschinen-
-          // Modell - "welche Zugmaschine welchen Auflieger zieht, spielt
-          // keine Rolle" (siehe Chat). Ohne Auflieger (frachtKategorie
-          // null) bleibt es wie bisher beim eigenen Fahrzeugtyp.
-          const typ = normalisiereFahrzeugtyp(details?.frachtKategorie || details?.typ) || kategorieLabel;
-          return {
-            ...f,
-            typ,
-            verbrauchsTyp: normalisiereFahrzeugtyp(details?.typ) || typ,
-            stellplaetze: details?.stellplaetze ?? holeFahrzeugSpezifikation(details?.frachtKategorie || details?.typ || kategorieLabel).stellplaetzeGesamt ?? null,
-          };
-        });
+        const fleet = baueFleetMitTyp(fleetMitLive, detailsMap, kategorieLabel);
 
         // WICHTIG: passende bleibt bewusst UNGEFILTERT nach Zielort - die
         // Ketten-Suche braucht genau diese Breite, um Zwischenetappen zu
@@ -2866,6 +2876,170 @@
 
     loadBtn.addEventListener('click', () => routenBerechnen(false));
     reloadBtn.addEventListener('click', () => routenBerechnen(true));
+
+    // --- Alle Fahrzeuge automatisch befüllen ---
+    const autofillBtn = document.getElementById('fi-dash-autofill-btn');
+    const autofillMinInput = document.getElementById('fi-dash-autofill-min');
+    let autofillLaeuft = false;
+    let autofillAbbruch = false;
+
+    autofillBtn.addEventListener('click', async () => {
+      if (autofillLaeuft) {
+        autofillAbbruch = true;
+        autofillBtn.textContent = 'Stoppe nach aktuellem Schritt …';
+        return;
+      }
+      const minEuroProKm = parseFloat(autofillMinInput.value);
+      const minWert = Number.isFinite(minEuroProKm) ? minEuroProKm : 2;
+      const bestaetigt = window.confirm(
+        `ALLE Fahrzeuge automatisch befüllen?\n\n` +
+        `Das Skript nimmt fortlaufend die jeweils beste Komplettladung (mind. ${minWert} €/km effektiv, Frist einhaltbar) ` +
+        `für jedes Fahrzeug VERBINDLICH an und plant sie ein, bis das Planungsfenster voll ist.\n\n` +
+        `Teilladungen/Ketten werden dabei NICHT berücksichtigt. Bei Nichtlieferung droht die Vertragsstrafe.`
+      );
+      if (!bestaetigt) return;
+
+      autofillLaeuft = true;
+      autofillAbbruch = false;
+      const originalText = autofillBtn.textContent;
+      autofillBtn.textContent = '⏹ Stopp';
+      loadBtn.disabled = true;
+      reloadBtn.disabled = true;
+      resultsEl.innerHTML = '<div class="fi-dash-card" style="grid-column: 1 / -1;"><div class="fi-dash-card-title">⚡ Befüllen läuft …</div><div id="fi-autofill-log"></div></div>';
+      const logEl = document.getElementById('fi-autofill-log');
+      const log = (text, klasse = 'fi-muted') => {
+        logEl.insertAdjacentHTML('beforeend', `<div class="fi-dash-row ${klasse}">${text}</div>`);
+      };
+
+      try {
+        const ergebnis = await befuelleFlotteAutomatisch({
+          minEuroProKm: minWert,
+          options,
+          log,
+          abgebrochen: () => autofillAbbruch,
+        });
+        log(`<strong>Fertig:</strong> ${ergebnis.anzahlAngenommen} Aufträge angenommen &amp; eingeplant · ${fmtEuro(ergebnis.summeEuro)} Vergütung`, 'fi-good');
+      } catch (e) {
+        console.error('[FI-Helper] Automatisches Befüllen fehlgeschlagen', e);
+        log(`Fehler: ${e.message}`, 'fi-bad');
+      } finally {
+        autofillLaeuft = false;
+        autofillBtn.textContent = originalText;
+        loadBtn.disabled = false;
+        reloadBtn.disabled = false;
+        await aktualisiereFlotte();
+      }
+    });
+  }
+
+  /**
+   * Befüllt ALLE Fahrzeuge fortlaufend mit Aufträgen: pro Runde wird für jede
+   * Fahrzeugkategorie der Markt gescannt, die beste konfliktfreie Komplettladung
+   * je Fahrzeug bestimmt, verbindlich angenommen und eingeplant; danach werden
+   * die Fahrzeugstände frisch geladen (neues "frei ab") und die nächste Runde
+   * beginnt - bis kein Fahrzeug mehr etwas Passendes im Planungsfenster findet.
+   * Bewusst NUR Komplettladungen (Einzelaufträge): Teilladungen/Ketten brauchen
+   * den Tourenplaner, dessen Request noch nicht erfasst ist.
+   * @param {{minEuroProKm: number, options: {value: string, label: string}[], log: Function, abgebrochen: Function}} param
+   */
+  async function befuelleFlotteAutomatisch({ minEuroProKm, options, log, abgebrochen }) {
+    const MAX_RUNDEN = 15;
+    let anzahlAngenommen = 0;
+    let summeEuro = 0;
+
+    const dieselPreisLive = await fetchDieselPreis(false);
+    if (dieselPreisLive != null) ASSUMPTIONS.dieselPreisProLiter = dieselPreisLive;
+    const staedteLive = await fetchStaedteDaten(false);
+    if (staedteLive) CITY_COORDS = { ...CITY_COORDS, ...staedteLive };
+    await aktualisierePlanungsfenster(false);
+
+    // Markt je Kategorie EINMAL frisch scannen; angenommene/fehlgeschlagene
+    // Jobs werden lokal aus dem Pool entfernt statt neu zu scannen.
+    const marktPools = new Map(); // kategorieLabel -> FrachtAngebot[] (nur Komplettladungen)
+    const letztesFreiAb = new Map(); // vehicleId -> "frei ab" (ms) zum Zeitpunkt der letzten Beplanung
+
+    for (let runde = 1; runde <= MAX_RUNDEN; runde++) {
+      if (abgebrochen()) { log('⏹ Vom Nutzer gestoppt.', 'fi-warn'); break; }
+
+      const fleetRoh = await fetchFleetStatus();
+      const [fleetMitLive, detailsMap] = await Promise.all([
+        Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null }))),
+        fetchFuhrparkDetails(true),
+      ]);
+      const fleet = baueFleetMitTyp(fleetMitLive, detailsMap, null)
+        .filter(f => f.typ && f.status?.vehicleId && f.status?.freiAbOrt && f.status?.freiAbZeit);
+
+      // Sicherheitsnetz: hat ein zuletzt beplantes Fahrzeug sein "frei ab"
+      // NICHT nach hinten verschoben, wurde der Auftrag zwar angenommen, aber
+      // nicht wirklich eingeplant - sofort abbrechen statt weitere Aufträge
+      // ins Leere anzunehmen.
+      const nichtVerschoben = fleet.filter(f => {
+        const vorher = letztesFreiAb.get(String(f.status.vehicleId));
+        return vorher != null && f.status.freiAbZeit.getTime() <= vorher;
+      });
+      if (nichtVerschoben.length) {
+        log(`⚠ Abbruch: Bei ${nichtVerschoben.map(f => f.name).join(', ')} hat sich das "frei ab" nach dem Einplanen nicht verschoben - bitte in der Disposition prüfen, ob die Aufträge wirklich eingeplant wurden.`, 'fi-bad');
+        break;
+      }
+
+      const kategorien = [...new Set(fleet.map(f => f.typ))];
+      const zuweisungen = [];
+
+      for (const label of kategorien) {
+        const option = options.find(o => o.label === label);
+        if (!option) { if (runde === 1) log(`Keine Frachtbörsen-Kategorie für "${label}" gefunden - übersprungen.`, 'fi-warn'); continue; }
+
+        if (!marktPools.has(label)) {
+          log(`Scanne Frachtbörse "${label}" …`);
+          const markt = await fetchAllOffersForBodyType(option.value, 20, () => {});
+          const pool = filtereNachAufbau(markt.angebote, label).filter(a => a.kapazitaet === 'Komplettladung' && a.jobId);
+          marktPools.set(label, pool);
+          log(`${pool.length} Komplettladungen für "${label}" gefunden.`);
+        }
+        const pool = marktPools.get(label);
+        const kompatibleFleet = fleet.filter(f => f.typ === label);
+        if (!pool.length || !kompatibleFleet.length) continue;
+
+        const beste = loeseFahrzeugKonflikte(findeBesteRoutenProFahrzeug(pool, kompatibleFleet, null, 0));
+        beste.forEach(eintrag => {
+          const k = eintrag.beste;
+          if (!k || !k.fracht.jobId) return;
+          const b = k.bewertung;
+          if (!b.einplanbar) return; // Planungsfenster für dieses Fahrzeug voll
+          if (b.schaffbar === false) return;
+          if (b.kapazitaetOk === false) return;
+          if (!(b.effektivProKm >= minEuroProKm)) return;
+          zuweisungen.push({ label, eintrag, kandidat: k });
+        });
+      }
+
+      if (!zuweisungen.length) {
+        log(runde === 1 ? 'Kein Fahrzeug hat einen passenden, einplanbaren Auftrag über der Mindestgrenze.' : 'Keine weiteren einplanbaren Aufträge - alle Fahrzeuge sind befüllt.');
+        break;
+      }
+
+      for (const z of zuweisungen) {
+        if (abgebrochen()) break;
+        const { fracht, bewertung } = z.kandidat;
+        const fahrzeugName = z.eintrag.fahrzeugName;
+        const freiAbVorher = z.eintrag.freiAbZeit;
+        try {
+          await nimmFrachtAnUndPlaneEin(fracht.jobId, z.eintrag.vehicleId, freiAbVorher);
+          anzahlAngenommen++;
+          summeEuro += fracht.verguetungEuro ?? 0;
+          letztesFreiAb.set(String(z.eintrag.vehicleId), freiAbVorher.getTime());
+          log(`✅ ${fahrzeugName}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2)} €/km effektiv · Ankunft ${bewertung.ankunftZeit.toLocaleString('de-DE')}`, 'fi-good');
+        } catch (e) {
+          log(`❌ ${fahrzeugName}: ${fracht.startOrt} → ${fracht.zielOrt} fehlgeschlagen: ${e.message}`, 'fi-bad');
+          console.error('[FI-Helper] Befüllen: Fehler bei', fracht, e);
+        }
+        // Job in jedem Fall aus dem lokalen Pool nehmen (angenommen ODER fehlgeschlagen)
+        const pool = marktPools.get(z.label);
+        marktPools.set(z.label, pool.filter(a => a.jobId !== fracht.jobId));
+      }
+    }
+
+    return { anzahlAngenommen, summeEuro };
   }
 
   /**
