@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.25
+// @version      0.29.26
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.25';
+  const SCRIPT_VERSION = '0.29.26';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -89,6 +89,7 @@
     fuhrparkTypBild: '.fleet-thumb img',               // alt-Attribut = Fahrzeugtyp, z.B. "Kleintransporter"
     fuhrparkName: '.fleet-name',
     fuhrparkKennzeichen: '.fleet-plate',
+    fuhrparkCoupledLink: '.fleet-coupled-preview',      // Zugmaschine -> Auflieger-Link, href endet auf "#trailer-<id>" (die id des Auflieger-<article>)
     fuhrparkInfoZeilen: '.fleet-info > div',           // Label/Wert-Paare: Standort, Fahrer 1/2, Kilometer, Tank, Stellplätze, Nutzlast, Leer/zGG
   };
 
@@ -1605,14 +1606,21 @@
    * @returns {Map<string, {typ: string, frachtKategorie: string|null, stellplaetze: number|null, hatFahrer: boolean}>}
    */
   function parseFuhrparkDetails(root = document) {
-    // Auflieger haben keine eigene data-vehicle-id, aber dasselbe Kennzeichen
-    // wie die Zugmaschine, an die sie gekoppelt sind - darüber lässt sich der
-    // richtige Aufbau-Typ für die Frachtbörsen-Suche finden.
+    // Zugmaschine -> Auflieger-Zuordnung: NICHT über das Kennzeichen (siehe Chat,
+    // 2026-09-28 - PL04 hatte ein anderes Kennzeichen als sein eigener Auflieger,
+    // das Kennzeichen ist KEIN verlässlicher Schlüssel), sondern über den
+    // expliziten "Auflieger ansehen"-Link auf der Zugmaschinen-Karte
+    // (.fleet-coupled-preview, href endet auf "#trailer-<id>" = die id des
+    // Auflieger-<article>). Fallback aufs Kennzeichen nur, falls dieser Link
+    // mal fehlt (z.B. Markup-Änderung).
+    const aufliegerTypNachId = new Map();
     const aufliegerTypNachKennzeichen = new Map();
     root.querySelectorAll(SELECTORS.fuhrparkAufliegerCard).forEach(card => {
-      const kennzeichen = card.querySelector(SELECTORS.fuhrparkKennzeichen)?.textContent.trim();
       const typ = card.querySelector(SELECTORS.fuhrparkTypBild)?.getAttribute('alt')?.trim();
-      if (kennzeichen && typ) aufliegerTypNachKennzeichen.set(kennzeichen, typ);
+      if (!typ) return;
+      if (card.id) aufliegerTypNachId.set(card.id, typ);
+      const kennzeichen = card.querySelector(SELECTORS.fuhrparkKennzeichen)?.textContent.trim();
+      if (kennzeichen) aufliegerTypNachKennzeichen.set(kennzeichen, typ);
     });
 
     const details = new Map();
@@ -1620,8 +1628,12 @@
       const vehicleId = card.dataset.vehicleId;
       if (!vehicleId) return;
       const typ = card.querySelector(SELECTORS.fuhrparkTypBild)?.getAttribute('alt')?.trim() || null;
+      const coupledHref = card.querySelector(SELECTORS.fuhrparkCoupledLink)?.getAttribute('href') || '';
+      const trailerId = /#(trailer-[\w-]+)/.exec(coupledHref)?.[1] || null;
       const kennzeichen = card.querySelector(SELECTORS.fuhrparkKennzeichen)?.textContent.trim();
-      const frachtKategorie = (kennzeichen && aufliegerTypNachKennzeichen.get(kennzeichen)) || null;
+      const frachtKategorie = (trailerId && aufliegerTypNachId.get(trailerId))
+        || (kennzeichen && aufliegerTypNachKennzeichen.get(kennzeichen))
+        || null;
 
       let stellplaetze = null;
       let hatFahrer = false;
