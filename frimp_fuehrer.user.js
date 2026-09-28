@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.26
+// @version      0.29.27
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.26';
+  const SCRIPT_VERSION = '0.29.27';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -90,6 +90,8 @@
     fuhrparkName: '.fleet-name',
     fuhrparkKennzeichen: '.fleet-plate',
     fuhrparkCoupledLink: '.fleet-coupled-preview',      // Zugmaschine -> Auflieger-Link, href endet auf "#trailer-<id>" (die id des Auflieger-<article>)
+    fuhrparkZustand: '.overall-condition',              // Verschleiß: <span>Zustand</span><div class="mini-fill good/warn/danger">…</div><span>86,6%</span>
+    fuhrparkHuBadge: '.fi-inspection-due-badge',         // Hauptuntersuchung: Klasse --valid/--warning/--critical/--expired/--missing, title = "Nächste Hauptuntersuchung: DD.MM.YYYY – <status>"
     fuhrparkInfoZeilen: '.fleet-info > div',           // Label/Wert-Paare: Standort, Fahrer 1/2, Kilometer, Tank, Stellplätze, Nutzlast, Leer/zGG
   };
 
@@ -1603,8 +1605,35 @@
    *   wie vom Nutzer gewünscht, nur mit zwei Spezifikations-Quellen: Diesel/
    *   Maut/Ladezeit richten sich nach der Zugmaschine (typ), die
    *   Frachtbörsen-Kompatibilität nach dem Auflieger (frachtKategorie).
-   * @returns {Map<string, {typ: string, frachtKategorie: string|null, stellplaetze: number|null, hatFahrer: boolean}>}
+   * @returns {Map<string, {typ: string, frachtKategorie: string|null, stellplaetze: number|null, hatFahrer: boolean, verschleiss: VerschleissInfo, auflieger: VerschleissInfo|null}>}
    */
+  /**
+   * @typedef {Object} VerschleissInfo
+   * @property {number|null} zustandProzent
+   * @property {string|null} zustandStufe    // 'good'/'ok'/'warn'/'danger' - Klassenname direkt vom Spiel, keine eigene Schwelle
+   * @property {string|null} huDatum         // "DD.MM.YYYY"
+   * @property {string|null} huStatus        // 'valid'/'warning'/'critical'/'expired'/'missing' - direkt aus der Spiel-CSS-Klasse
+   */
+
+  /** Liest Zustand-% und HU-Badge aus EINER Fahrzeug-/Auflieger-Karte. */
+  function parseVerschleiss(card) {
+    const zustandContainer = card.querySelector(SELECTORS.fuhrparkZustand);
+    const zustandText = zustandContainer ? [...zustandContainer.querySelectorAll('span')].map(s => s.textContent.trim()).find(t => /%/.test(t)) : null;
+    const zustandProzent = zustandText ? parseGermanNumber(zustandText) : null;
+    const zustandStufe = zustandContainer?.querySelector('.mini-fill')?.className.replace('mini-fill', '').trim() || null;
+
+    const huBadge = card.querySelector(SELECTORS.fuhrparkHuBadge);
+    const huDatumMatch = /(\d{2}\.\d{2}\.\d{4})/.exec(huBadge?.getAttribute('title') || '');
+    const huStufeMatch = /fi-inspection-due-badge--(\w+)/.exec(huBadge?.className || '');
+
+    return {
+      zustandProzent,
+      zustandStufe,
+      huDatum: huDatumMatch ? huDatumMatch[1] : null,
+      huStatus: huStufeMatch ? huStufeMatch[1] : null,
+    };
+  }
+
   function parseFuhrparkDetails(root = document) {
     // Zugmaschine -> Auflieger-Zuordnung: NICHT über das Kennzeichen (siehe Chat,
     // 2026-09-28 - PL04 hatte ein anderes Kennzeichen als sein eigener Auflieger,
@@ -1615,10 +1644,14 @@
     // mal fehlt (z.B. Markup-Änderung).
     const aufliegerTypNachId = new Map();
     const aufliegerTypNachKennzeichen = new Map();
+    const aufliegerVerschleissNachId = new Map();
     root.querySelectorAll(SELECTORS.fuhrparkAufliegerCard).forEach(card => {
       const typ = card.querySelector(SELECTORS.fuhrparkTypBild)?.getAttribute('alt')?.trim();
       if (!typ) return;
-      if (card.id) aufliegerTypNachId.set(card.id, typ);
+      if (card.id) {
+        aufliegerTypNachId.set(card.id, typ);
+        aufliegerVerschleissNachId.set(card.id, parseVerschleiss(card));
+      }
       const kennzeichen = card.querySelector(SELECTORS.fuhrparkKennzeichen)?.textContent.trim();
       if (kennzeichen) aufliegerTypNachKennzeichen.set(kennzeichen, typ);
     });
@@ -1649,7 +1682,10 @@
         }
       });
 
-      details.set(vehicleId, { typ, frachtKategorie, stellplaetze, hatFahrer });
+      const verschleiss = parseVerschleiss(card);
+      const auflieger = trailerId ? (aufliegerVerschleissNachId.get(trailerId) || null) : null;
+
+      details.set(vehicleId, { typ, frachtKategorie, stellplaetze, hatFahrer, verschleiss, auflieger });
     });
     return details;
   }
@@ -2588,8 +2624,41 @@
         </div>`;
       }
 
+      // Verschleiß & Hauptuntersuchung: Zustand-% und HU-Badge kommen direkt aus
+      // fuhrpark.php (siehe parseVerschleiss) - Warnschwelle ist NICHT selbst
+      // erfunden, sondern die vom Spiel selbst vergebene Klasse (mini-fill
+      // good/warn/danger, fi-inspection-due-badge--valid/warning/critical/
+      // expired/missing). Auflieger werden separat geprüft, da sie unabhängig
+      // vom Zugfahrzeug verschleißen/zur HU müssen.
+      const verschleissWarnungen = [];
+      fleet.forEach(f => {
+        const vehicleId = f.status?.vehicleId;
+        if (!vehicleId) return;
+        const d = fuhrparkDetails.get(String(vehicleId));
+        if (!d) return;
+        [{ label: f.name, info: d.verschleiss }, ...(d.auflieger ? [{ label: `${f.name} · Auflieger`, info: d.auflieger }] : [])]
+          .forEach(({ label, info }) => {
+            const zustandKritisch = info.zustandStufe && !['good', 'ok'].includes(info.zustandStufe);
+            const huKritisch = info.huStatus && info.huStatus !== 'valid';
+            if (zustandKritisch || huKritisch) verschleissWarnungen.push({ label, info, zustandKritisch, huKritisch });
+          });
+      });
+      if (verschleissWarnungen.length) {
+        html += `<div class="fi-dash-card" style="border-color: rgba(255,92,92,.4);">
+          <div class="fi-dash-card-title">⚠ ${verschleissWarnungen.length} Warnung(en): Verschleiß / Hauptuntersuchung</div>
+          ${verschleissWarnungen.map(w => {
+            const teile = [];
+            if (w.zustandKritisch) teile.push(`Zustand ${w.info.zustandProzent != null ? w.info.zustandProzent + '%' : '?'} (${w.info.zustandStufe})`);
+            if (w.huKritisch) teile.push(`HU ${w.info.huDatum ?? '?'} (${w.info.huStatus})`);
+            return `<div class="fi-dash-row fi-warn">🔧 ${w.label}: ${teile.join(' · ')}</div>`;
+          }).join('')}
+          <div class="fi-dash-row fi-muted">→ Details/Werkstatt in <a href="/game/fuhrpark.php" style="color:#ffd98a;">fuhrpark.php</a></div>
+        </div>`;
+      }
+
       // Die einzelnen Fahrzeugkarten sind auf Wunsch entfallen (die Timeline zeigt
-      // alles); übrig bleibt nur die Warnung für Fahrzeuge ohne Fahrer.
+      // alles); übrig bleibt die Warnung für Fahrzeuge ohne Fahrer plus die
+      // Verschleiß/HU-Warnung oben.
       fleetEl.innerHTML = html;
 
       // --- Timeline: alle Fahrzeuge auf einen Blick (wie der spieleigene
