@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.27
+// @version      0.29.28
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.27';
+  const SCRIPT_VERSION = '0.29.28';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2544,10 +2544,6 @@
         <button type="button" id="fi-dash-load-btn" class="fi-dash-btn">Beste Routen berechnen</button>
         <button type="button" id="fi-dash-reload-btn" class="fi-dash-btn-reload" title="Cache umgehen und frisch laden">🔄</button>
         <div class="fi-dash-field">
-          <label>Min. effektiv €/km</label>
-          <input type="number" id="fi-dash-autofill-min" value="2" min="0" step="0.1" class="fi-dash-select" style="min-width:80px;" title="Aufträge unter diesem Netto-€/km werden beim Befüllen ignoriert">
-        </div>
-        <div class="fi-dash-field">
           <label><input type="checkbox" id="fi-dash-autofill-dry" checked> Trockenlauf (nichts buchen)</label>
         </div>
         <button type="button" id="fi-dash-autofill-btn" class="fi-dash-btn" title="Nimmt für ALLE Fahrzeuge fortlaufend die besten Komplettladungen an und plant sie ein, bis das Planungsfenster voll ist">⚡ Alle Fahrzeuge befüllen</button>
@@ -2981,7 +2977,6 @@
 
     // --- Alle Fahrzeuge automatisch befüllen ---
     const autofillBtn = document.getElementById('fi-dash-autofill-btn');
-    const autofillMinInput = document.getElementById('fi-dash-autofill-min');
     let autofillLaeuft = false;
     let autofillAbbruch = false;
 
@@ -2991,12 +2986,10 @@
         autofillBtn.textContent = 'Stoppe nach aktuellem Schritt …';
         return;
       }
-      const minEuroProKm = parseFloat(autofillMinInput.value);
-      const minWert = Number.isFinite(minEuroProKm) ? minEuroProKm : 2;
       const trocken = document.getElementById('fi-dash-autofill-dry').checked;
       const bestaetigt = trocken || window.confirm(
         `ALLE Fahrzeuge automatisch befüllen?\n\n` +
-        `Das Skript nimmt fortlaufend die jeweils beste Komplettladung (mind. ${minWert} €/km effektiv, Frist einhaltbar) ` +
+        `Das Skript nimmt fortlaufend die jeweils beste Komplettladung (ohne Mindest-€/km, nur kein Verlustgeschäft, Frist einhaltbar) ` +
         `für jedes Fahrzeug VERBINDLICH an und plant sie ein, bis das Planungsfenster voll ist.\n\n` +
         `Teilladungen/Ketten werden dabei NICHT berücksichtigt. Bei Nichtlieferung droht die Vertragsstrafe.`
       );
@@ -3016,7 +3009,6 @@
 
       try {
         const ergebnis = await befuelleFlotteAutomatisch({
-          minEuroProKm: minWert,
           options,
           log,
           abgebrochen: () => autofillAbbruch,
@@ -3046,9 +3038,9 @@
    * beginnt - bis kein Fahrzeug mehr etwas Passendes im Planungsfenster findet.
    * Bewusst NUR Komplettladungen (Einzelaufträge): Teilladungen/Ketten brauchen
    * den Tourenplaner, dessen Request noch nicht erfasst ist.
-   * @param {{minEuroProKm: number, options: {value: string, label: string}[], log: Function, abgebrochen: Function}} param
+   * @param {{options: {value: string, label: string}[], log: Function, abgebrochen: Function, trocken?: boolean}} param
    */
-  async function befuelleFlotteAutomatisch({ minEuroProKm, options, log, abgebrochen, trocken = false }) {
+  async function befuelleFlotteAutomatisch({ options, log, abgebrochen, trocken = false }) {
     const MAX_RUNDEN = 15;
     let simulierteFlotte = null;
     let anzahlAngenommen = 0;
@@ -3129,7 +3121,7 @@
           if (!b.einplanbar) return; // Planungsfenster für dieses Fahrzeug voll
           if (b.schaffbar === false) return;
           if (b.kapazitaetOk === false) return;
-          if (!(b.effektivProKm >= minEuroProKm)) return;
+          if (!(b.effektivProKm > 0)) return; // einzige Untergrenze: kein Verlustgeschäft
           zuweisungen.push({ label, eintrag, kandidat: k });
         });
       }
