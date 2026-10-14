@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.28
+// @version      0.29.29
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.28';
+  const SCRIPT_VERSION = '0.29.29';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -1364,6 +1364,57 @@
       let kandidaten = schaffbare.length > 0 ? schaffbare : bewertungen;
 
       kandidaten.forEach(k => { k.bewertung.kombiScore = kombinierterScore(k.bewertung); });
+      kandidaten.sort((a, b) => b.bewertung.kombiScore - a.bewertung.kombiScore);
+
+      // VORAUSSCHAU (maximale Effektivität = wenig Leerfahrt bei viel Profit):
+      // Ein Auftrag, der das Fahrzeug in eine Sackgasse (z.B. hoher Norden)
+      // schickt, sieht allein gut aus, erzwingt aber danach eine lange
+      // Leerfahrt. Deshalb wird für die besten Kandidaten zusätzlich der beste
+      // ANSCHLUSSauftrag ab dem Zielort gesucht und das Paar als Ganzes
+      // bewertet: (Profit A + Profit B) / (alle km inkl. beider Anfahrten).
+      // Gebucht wird weiterhin nur der erste Auftrag - der Anschluss wird
+      // beim nächsten Durchlauf mit echtem Fahrzeugstand neu bestimmt.
+      const LOOKAHEAD_TOP = 12;
+      const FOLGE_PRUEFEN = 40;
+      const FOLGE_MAX_ANFAHRT_KM = 600;
+      const frischeLive = fahrzeug.live?.drivers
+        ? { ...fahrzeug.live, drivers: fahrzeug.live.drivers.map(d => ({ ...d, remaining_drive_seconds: null, remaining_shift_seconds: null })) }
+        : null;
+      kandidaten = kandidaten.slice(0, LOOKAHEAD_TOP);
+      kandidaten.forEach(k => {
+        const basis = k.bewertung;
+        if (basis.effektivProKm == null || !k.fracht?.zielOrt || !basis.ankunftZeit) return;
+        const belegt = new Set(holeJobIdsVonKandidat(k));
+        const folgeStatus = { ...fahrzeug.status, freiAbOrt: k.fracht.zielOrt, freiAbZeit: basis.ankunftZeit };
+        const gesamtKmErster = (basis.anfahrtKm ?? 0) + (k.fracht.entfernungKm ?? 0);
+
+        const folgeKandidaten = [];
+        angebote.forEach(f => {
+          if (!f.startOrt || !f.jobId || belegt.has(f.jobId)) return;
+          const anfahrt = geschaetzteStrassenKm(k.fracht.zielOrt, f.startOrt);
+          if (anfahrt === null || anfahrt > FOLGE_MAX_ANFAHRT_KM) return;
+          const kmGesamt = anfahrt + (f.entfernungKm ?? 0);
+          if (kmGesamt <= 0) return;
+          folgeKandidaten.push({ f, schaetzung: (f.verguetungEuro ?? 0) / kmGesamt });
+        });
+        folgeKandidaten.sort((a, b) => b.schaetzung - a.schaetzung);
+
+        let besteFolge = null;
+        folgeKandidaten.slice(0, FOLGE_PRUEFEN).forEach(({ f }) => {
+          const bF = bewerteFrachtFuerFahrzeug(f, folgeStatus, frischeLive, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null);
+          if (!bF || bF.schaffbar === false || bF.deckungsbeitragEuro == null) return;
+          const paarKm = gesamtKmErster + bF.anfahrtKm + (f.entfernungKm ?? 0);
+          if (paarKm <= 0) return;
+          const paarEff = (basis.deckungsbeitragEuro + bF.deckungsbeitragEuro) / paarKm;
+          if (!besteFolge || paarEff > besteFolge.paarEff) besteFolge = { fracht: f, bewertung: bF, paarEff };
+        });
+
+        if (besteFolge) {
+          const strafen = basis.effektivProKm - basis.kombiScore; // Umweg-/Anfahrt-Strafen des ersten Auftrags bleiben erhalten
+          basis.kombiScore = besteFolge.paarEff - strafen;
+          basis.folge = besteFolge;
+        }
+      });
       kandidaten.sort((a, b) => b.bewertung.kombiScore - a.bewertung.kombiScore);
 
       return {
@@ -2925,6 +2976,10 @@
               }
               if (bewertung.kapazitaetHinweis) html += `<div class="fi-dash-row fi-warn">📦 ${bewertung.kapazitaetHinweis}</div>`;
               html += `<div class="fi-dash-row fi-muted">🕐 Ankunft: ${bewertung.ankunftZeit.toLocaleString('de-DE')}</div>`;
+              if (bewertung.folge) {
+                const fo = bewertung.folge;
+                html += `<div class="fi-dash-row fi-muted">➡ Danach (Vorausschau): ${fo.fracht.startOrt} → ${fo.fracht.zielOrt} · Anfahrt ~${Math.round(fo.bewertung.anfahrtKm)} km · zusammen ${fo.paarEff.toFixed(2)} €/km</div>`;
+              }
               html += `<div class="fi-dash-row ${schaffbarKlasse}">${schaffbarIcon} ${schaffbarText}</div>`;
               if (bewertung.lenkzeitHinweis) html += `<div class="fi-dash-row fi-warn">⏱ ${bewertung.lenkzeitHinweis}</div>`;
               if (!bewertung.einplanbar) html += `<div class="fi-dash-row fi-warn">⏳ ${bewertung.einplanbarHinweis}</div>`;
@@ -3137,7 +3192,7 @@
         const fahrzeugName = z.eintrag.fahrzeugName;
         const freiAbVorher = z.eintrag.freiAbZeit;
         try {
-          const beschreibung = `${fahrzeugName}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2)} €/km effektiv · Beladung ab ${bewertung.beladungsStartZeit.toLocaleString('de-DE')} · Ankunft ${bewertung.ankunftZeit.toLocaleString('de-DE')}`;
+          const beschreibung = `${fahrzeugName}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2)} €/km effektiv · Beladung ab ${bewertung.beladungsStartZeit.toLocaleString('de-DE')} · Ankunft ${bewertung.ankunftZeit.toLocaleString('de-DE')}${bewertung.folge ? ` · danach ${bewertung.folge.fracht.startOrt} → ${bewertung.folge.fracht.zielOrt} (zusammen ${bewertung.folge.paarEff.toFixed(2)} €/km)` : ''}`;
           if (trocken) {
             const f = fleet.find(x => String(x.status.vehicleId) === String(z.eintrag.vehicleId));
             f.status = { ...f.status, freiAbZeit: bewertung.ankunftZeit, freiAbOrt: fracht.zielOrt };
