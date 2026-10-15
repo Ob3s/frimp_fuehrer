@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.29
+// @version      0.29.30
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.29';
+  const SCRIPT_VERSION = '0.29.30';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3377,16 +3377,22 @@
   //     20% des Monatsgehalts (Fahrer wie Disponent), ein fixer Faktor
   //     ändert nie die Rangfolge zwischen Bewerbern.
   // ============================================================
+  // Layout-Update des Spiels (2026-10-15): Karten heißen jetzt
+  // article.card.fi-person-card (Kopf/Fakten-Container umbenannt), "Eignung"
+  // heißt jetzt "Zuverlässigkeit" (.fi-person-reliability), das Gehalt steht in
+  // .fi-person-terms, die Freischaltung unter "Weitere Angaben". Die alten
+  // Selektoren bleiben als Fallback erhalten.
   const PERSONALBOERSE_SELEKTOREN = {
     karte: 'article.card',
-    name: '.card-head .name',
-    rolle: '.card-head .role',
-    eignung: '.card-head .score strong',
-    fact: '.facts .fact',
+    name: '.name',
+    rolle: '.role',
+    eignung: '.fi-person-reliability strong, .card-head .score strong',
+    fact: '.fi-person-terms > div, .fi-person-detail-grid > div, .facts .fact',
+    badgeAnker: '.fi-person-terms, .facts',
     statBueroLevel: '.stats .stat',
   };
 
-  /** @returns {{card: Element, name: string|null, rolle: string|null, eignung: number|null, gehalt: number|null, freischaltungLevel: number}} */
+  /** @returns {{card: Element, name: string|null, rolle: string|null, eignung: number|null, gehalt: number|null, freischaltungLevel: number, gesperrt: boolean}} */
   function parsePersonalKarte(card) {
     const name = card.querySelector(PERSONALBOERSE_SELEKTOREN.name)?.textContent.trim() ?? null;
     const rolle = card.querySelector(PERSONALBOERSE_SELEKTOREN.rolle)?.textContent.trim() ?? null;
@@ -3399,15 +3405,15 @@
       const wert = f.querySelector('strong')?.textContent.trim();
       if (label) facts[label] = wert;
     });
-    const gehaltText = facts['Monatsgehalt'] ?? '';
+    const gehaltText = facts['Gehalt'] ?? facts['Monatsgehalt'] ?? '';
     const gehalt = gehaltText ? parseFloat(gehaltText.replace(/[^\d,-]/g, '').replace(/\./g, '').replace(',', '.')) : null;
     const freischaltungMatch = (facts['Freischaltung'] ?? '').match(/(\d+)/);
     const freischaltungLevel = freischaltungMatch ? parseInt(freischaltungMatch[1], 10) : 1;
 
-    return { card, name, rolle, eignung, gehalt, freischaltungLevel };
+    return { card, name, rolle, eignung, gehalt, freischaltungLevel, gesperrt: card.classList.contains('locked') };
   }
 
-  /** @returns {number|null} Eignungspunkte pro 1.000 € Monatsgehalt, oder null falls Eignung/Gehalt fehlt */
+  /** @returns {number|null} Zuverlässigkeits-/Eignungspunkte pro 1.000 € Monatsgehalt, oder null falls Wert/Gehalt fehlt */
   function berechnePersonalWert(kandidat) {
     if (kandidat.eignung == null || !kandidat.gehalt) return null;
     return (kandidat.eignung / kandidat.gehalt) * 1000;
@@ -3455,18 +3461,18 @@
     const kandidaten = karten.map(parsePersonalKarte).map(k => ({
       ...k,
       wert: berechnePersonalWert(k),
-      gesperrt: aktuellesBueroLevel != null && k.freischaltungLevel > aktuellesBueroLevel,
+      gesperrt: k.gesperrt || (aktuellesBueroLevel != null && k.freischaltungLevel > aktuellesBueroLevel),
     }));
 
     kandidaten.forEach(k => {
       const badge = document.createElement('div');
       badge.className = 'fi-personal-wert' + (k.gesperrt ? ' fi-gesperrt' : '');
-      badge.title = 'Eignungspunkte pro 1.000 € Monatsgehalt - hoher Wert = viel Eignung für wenig Gehalt';
+      badge.title = 'Zuverlässigkeit (früher: Eignung) in Prozentpunkten pro 1.000 € Monatsgehalt - hoher Wert = viel für wenig Gehalt';
       badge.textContent = k.wert != null ? `⭐ ${k.wert.toFixed(1)} ` : '⭐ –';
       const small = document.createElement('small');
       small.textContent = k.gesperrt ? `🔒 ab Büro-Level ${k.freischaltungLevel}` : '/ 1.000 € Gehalt';
       badge.appendChild(small);
-      k.card.querySelector(PERSONALBOERSE_SELEKTOREN.fact)?.closest('.facts')?.insertAdjacentElement('afterend', badge)
+      k.card.querySelector(PERSONALBOERSE_SELEKTOREN.badgeAnker)?.insertAdjacentElement('afterend', badge)
         ?? k.card.appendChild(badge);
     });
 
