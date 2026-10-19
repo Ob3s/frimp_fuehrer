@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.42
+// @version      0.29.43
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.42';
+  const SCRIPT_VERSION = '0.29.43';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -708,6 +708,91 @@
   }
 
   /**
+   * Fahrer-Restzeiten AM ZEITPUNKT, ab dem das Fahrzeug frei ist (nicht "jetzt").
+   * Die Live-Werte (driver_time_status.php) gelten nur für jetzt; wird das
+   * Fahrzeug erst in Stunden/Tagen frei, hängt der Zustand davon ab, was im
+   * Dispositionsplan davor noch passiert (Fahrten, 45-min-Pausen, Schichtpause).
+   * Deshalb wird der Zustand aus den Phasen des Fahrzeugs rekonstruiert:
+   *  - Schichtuhr: seit dem Ende der letzten Schichtpause (Wanduhr; 15 h / 21 h)
+   *  - Fahruhr: gefahrene Zeit seit der letzten Pause/Schichtpause (4,5 h / 9 h)
+   * Ohne Pause im Plan wird vom Live-Wert ausgegangen und die bis dahin
+   * geplante Zeit abgezogen. Ein explizit mitgegebener Zustand
+   * (vehicleStatus.fahrerRestOverride, z.B. Ende einer Vor-Tour) hat Vorrang.
+   */
+  function holeRestzeiten(vehicleStatus, liveStatus, fahreranzahl) {
+    if (vehicleStatus?.fahrerRestOverride) {
+      const o = vehicleStatus.fahrerRestOverride;
+      return { restLenkzeitStunden: o.restLenkzeitStunden, restSchichtzeitStunden: o.restSchichtzeitStunden, lenkzeitUngeprueft: false };
+    }
+    const liveLenk = liveStatus?.drivers?.[0]?.remaining_drive_seconds != null ? liveStatus.drivers[0].remaining_drive_seconds / 3600 : null;
+    const liveSchicht = liveStatus?.drivers?.[0]?.remaining_shift_seconds != null ? liveStatus.drivers[0].remaining_shift_seconds / 3600 : null;
+    const jetzt = Date.now();
+    const freiAb = vehicleStatus?.freiAbZeit?.getTime() ?? jetzt;
+    const phasen = (vehicleStatus?.phasen ?? []).filter(p => p.start && p.ende && p.ende.getTime() <= freiAb + 60000);
+    if (freiAb <= jetzt + 5 * 60000 || !phasen.length) {
+      return { restLenkzeitStunden: liveLenk, restSchichtzeitStunden: liveSchicht, lenkzeitUngeprueft: liveLenk === null || liveSchicht === null };
+    }
+    const regeln = LENKZEIT_REGELN[fahreranzahl] || LENKZEIT_REGELN[1];
+    const endeMax = typen => phasen.filter(p => typen.includes(p.type)).reduce((m, p) => Math.max(m, p.ende.getTime()), 0) || null;
+    const letzteSchicht = endeMax(['schichtpause']);
+    const letztePause = endeMax(['pause', 'schichtpause']);
+
+    let restSchicht = null;
+    if (letzteSchicht) restSchicht = regeln.spaetestesSchichtendeStunden - (freiAb - letzteSchicht) / 3600000;
+    else if (liveSchicht !== null) restSchicht = liveSchicht - (freiAb - jetzt) / 3600000;
+
+    const ab = letztePause ?? jetzt;
+    const gefahren = phasen
+      .filter(p => p.type === 'leerfahrt' || p.type === 'fahrt_beladen')
+      .reduce((sum, p) => sum + Math.max(0, p.ende.getTime() - Math.max(p.start.getTime(), ab)), 0) / 3600000;
+    let restLenk = null;
+    if (letztePause) restLenk = regeln.fahrzeitAmStueck - gefahren;
+    else if (liveLenk !== null) restLenk = liveLenk - gefahren;
+
+    const klemme = v => (v === null ? null : Math.max(0, v));
+    restLenk = klemme(restLenk);
+    restSchicht = klemme(restSchicht);
+    return { restLenkzeitStunden: restLenk, restSchichtzeitStunden: restSchicht, lenkzeitUngeprueft: restLenk === null || restSchicht === null };
+  }
+
+  // ----- Prognose-Messung (Beladungsstart: Schätzung vs. Plan des Spiels) -----
+  // Bei jeder Buchung wird der von uns vorhergesagte Beladungsstart mit dem
+  // tatsächlich vom Spiel geplanten verglichen. Daraus ergibt sich der
+  // Sicherheitsabstand zum Fensterende aus echten Messwerten statt einer
+  // geschätzten Zahl (bis genug Messungen vorliegen: 3 h Standard).
+  const PROGNOSE_LOG_KEY = 'fi_prognose_log_v1';
+  function ladePrognoseLog() {
+    try { return JSON.parse(window.localStorage.getItem(PROGNOSE_LOG_KEY) || '[]'); } catch (e) { return []; }
+  }
+  function speicherePrognose(eintrag) {
+    const log = ladePrognoseLog();
+    log.push(eintrag);
+    while (log.length > 60) log.shift();
+    try { window.localStorage.setItem(PROGNOSE_LOG_KEY, JSON.stringify(log)); } catch (e) { /* nur nicht speichern */ }
+  }
+  /** Sicherheitsabstand in Stunden: größte Verspätung des Spiels ggü. unserer Prognose der letzten 30 Messungen + 0,5 h (1-8 h); unter 8 Messungen: 3 h. */
+  function aktuellerPlanungspuffer() {
+    const log = ladePrognoseLog().slice(-30);
+    if (log.length < 8) return 3;
+    const spaeter = log.map(x => x.diffStunden).filter(x => x > 0);
+    const maxSpaeter = spaeter.length ? Math.max(...spaeter) : 0;
+    return Math.min(8, Math.max(1, maxSpaeter + 0.5));
+  }
+  /** Misst nach erfolgreichem Einplanen die Abweichung (positiv = Spiel startet später als unsere Prognose). */
+  function messePrognose(status, fahrzeugName, planStart, prognoseBeladung) {
+    try {
+      if (!status?.phasen || !prognoseBeladung) return;
+      const laden = status.phasen
+        .filter(p => p.type === 'laden' && p.start && p.start.getTime() >= planStart.getTime() - 60000)
+        .sort((a, b) => a.start - b.start)[0];
+      if (!laden) return;
+      const diffStunden = (laden.start.getTime() - prognoseBeladung.getTime()) / 3600000;
+      speicherePrognose({ zeit: new Date().toISOString(), fahrzeug: fahrzeugName, prognose: prognoseBeladung.toISOString(), ist: laden.start.toISOString(), diffStunden: +diffStunden.toFixed(2) });
+      console.log('[FI-Helper] Prognose-Messung:', fahrzeugName, 'Beladung Prognose', prognoseBeladung.toLocaleString('de-DE'), '- Spiel', laden.start.toLocaleString('de-DE'), `(${diffStunden >= 0 ? '+' : ''}${diffStunden.toFixed(1)} h)`);
+    } catch (e) { console.warn('[FI-Helper] Prognose-Messung fehlgeschlagen', e); }
+  }
+
+  /**
    * Bewertet ein Frachtangebot für ein konkretes Fahrzeug inkl. Fristen-Check,
    * echter Lade-/Entladezeit-Formel UND exakter Lenkzeit-/Schichtpausen-
    * Simulation nach den offiziellen Spielregeln (1 vs. 2 Fahrer).
@@ -746,11 +831,7 @@
     const gesamtFahrKm = anfahrtKm + fahrtKm;
 
     const fahreranzahl = liveStatus?.drivers?.length >= 2 ? 2 : 1;
-    const restLenkzeitStunden = liveStatus?.drivers?.[0]?.remaining_drive_seconds != null
-      ? liveStatus.drivers[0].remaining_drive_seconds / 3600 : null;
-    const restSchichtzeitStunden = liveStatus?.drivers?.[0]?.remaining_shift_seconds != null
-      ? liveStatus.drivers[0].remaining_shift_seconds / 3600 : null;
-    const lenkzeitUngeprueft = restLenkzeitStunden === null || restSchichtzeitStunden === null;
+    const { restLenkzeitStunden, restSchichtzeitStunden, lenkzeitUngeprueft } = holeRestzeiten(vehicleStatus, liveStatus, fahreranzahl);
 
     const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
     const { laden: ladeZeitStunden, entladen: entladeZeitStunden } = berechneLadeEntladeZeiten(fracht, spezifikation, fahreranzahl, fahrzeugStellplaetze, ladeKategorie);
@@ -789,7 +870,7 @@
     // gegen freiAbZeit (Bugfix, siehe Chat - Fehlermeldung nannte explizit
     // "nächstmöglicher Beladungsstart").
     const planungsfensterEnde = new Date(Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000);
-    const einplanbar = beladungsStartZeit.getTime() + PLANUNG_PUFFER_STUNDEN * 3600 * 1000 <= planungsfensterEnde.getTime();
+    const einplanbar = beladungsStartZeit.getTime() + aktuellerPlanungspuffer() * 3600 * 1000 <= planungsfensterEnde.getTime();
     const einplanbarHinweis = einplanbar
       ? null
       : `Nächstmöglicher Beladungsstart (${beladungsStartZeit.toLocaleString('de-DE')}) liegt außerhalb des ${PLANUNGSFENSTER_STUNDEN}h-Planungsfensters (Fenster endet ${planungsfensterEnde.toLocaleString('de-DE')}) - noch nicht einplanbar, erst annehmen und später einplanen`;
@@ -811,6 +892,7 @@
     return {
       anfahrtKm, gesamtStunden, ankunftZeit, schaffbar, effektivProKm, deckungsbeitragEuro,
       kostenAnfahrt, anfahrtAnteilProzent, beladungsStartZeit,
+      fahrerRestLenkEnde: restErgebnis.restPflichtpause, fahrerRestSchichtEnde: restErgebnis.restSchichtzeit,
       lenkzeitHinweis,
       lenkzeitUngeprueft,
       kapazitaetOk,
@@ -953,11 +1035,7 @@
     const fahrt2Km = etappe2.entfernungKm ?? 0;
 
     const fahreranzahl = liveStatus?.drivers?.length >= 2 ? 2 : 1;
-    const restLenkzeitStunden = liveStatus?.drivers?.[0]?.remaining_drive_seconds != null
-      ? liveStatus.drivers[0].remaining_drive_seconds / 3600 : null;
-    const restSchichtzeitStunden = liveStatus?.drivers?.[0]?.remaining_shift_seconds != null
-      ? liveStatus.drivers[0].remaining_shift_seconds / 3600 : null;
-    const lenkzeitUngeprueft = restLenkzeitStunden === null || restSchichtzeitStunden === null;
+    const { restLenkzeitStunden, restSchichtzeitStunden, lenkzeitUngeprueft } = holeRestzeiten(vehicleStatus, liveStatus, fahreranzahl);
 
     const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
     const zeiten1 = berechneLadeEntladeZeiten(etappe1, spezifikation, fahreranzahl, fahrzeugStellplaetze, ladeKategorie);
@@ -1024,7 +1102,7 @@
     // Planungsfenster-Check: gegen den ECHTEN Beladungsstart prüfen, nicht
     // gegen freiAbZeit (Bugfix, siehe Chat).
     const planungsfensterEnde = new Date(Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000);
-    const einplanbar = beladungsStartZeit.getTime() + PLANUNG_PUFFER_STUNDEN * 3600 * 1000 <= planungsfensterEnde.getTime();
+    const einplanbar = beladungsStartZeit.getTime() + aktuellerPlanungspuffer() * 3600 * 1000 <= planungsfensterEnde.getTime();
     const einplanbarHinweis = einplanbar
       ? null
       : `Nächstmöglicher Beladungsstart (${beladungsStartZeit.toLocaleString('de-DE')}) liegt außerhalb des ${PLANUNGSFENSTER_STUNDEN}h-Planungsfensters (Fenster endet ${planungsfensterEnde.toLocaleString('de-DE')}) - noch nicht einplanbar, erst annehmen und später einplanen`;
@@ -1036,6 +1114,7 @@
       kapazitaetOk: true, kapazitaetHinweis: null,
       einplanbar, einplanbarHinweis,
       zwischenankunft, etappe1Schaffbar, etappe2Schaffbar,
+      fahrerRestLenkEnde: teil2.restPflichtpause, fahrerRestSchichtEnde: teil2.restSchichtzeit,
     };
   }
 
@@ -1152,11 +1231,7 @@
     if (anfahrtKm === null) return null;
 
     const fahreranzahl = liveStatus?.drivers?.length >= 2 ? 2 : 1;
-    const restLenkzeitStunden = liveStatus?.drivers?.[0]?.remaining_drive_seconds != null
-      ? liveStatus.drivers[0].remaining_drive_seconds / 3600 : null;
-    const restSchichtzeitStunden = liveStatus?.drivers?.[0]?.remaining_shift_seconds != null
-      ? liveStatus.drivers[0].remaining_shift_seconds / 3600 : null;
-    const lenkzeitUngeprueft = restLenkzeitStunden === null || restSchichtzeitStunden === null;
+    const { restLenkzeitStunden, restSchichtzeitStunden, lenkzeitUngeprueft } = holeRestzeiten(vehicleStatus, liveStatus, fahreranzahl);
 
     const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
     const geschwindigkeit = spezifikation.geschwindigkeitKmh ?? ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
@@ -1212,7 +1287,7 @@
     const anfahrtAnteilProzent = gesamtFahrKm > 0 ? Math.round((anfahrtKm / gesamtFahrKm) * 100) : null;
 
     const planungsfensterEnde = new Date(Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000);
-    const einplanbar = beladungsStartZeit.getTime() + PLANUNG_PUFFER_STUNDEN * 3600 * 1000 <= planungsfensterEnde.getTime();
+    const einplanbar = beladungsStartZeit.getTime() + aktuellerPlanungspuffer() * 3600 * 1000 <= planungsfensterEnde.getTime();
     const einplanbarHinweis = einplanbar
       ? null
       : `Nächstmöglicher Beladungsstart (${beladungsStartZeit.toLocaleString('de-DE')}) liegt außerhalb des ${PLANUNGSFENSTER_STUNDEN}h-Planungsfensters (Fenster endet ${planungsfensterEnde.toLocaleString('de-DE')}) - noch nicht einplanbar, erst annehmen und später einplanen`;
@@ -1224,6 +1299,7 @@
       kapazitaetOk: true, kapazitaetHinweis: null,
       einplanbar, einplanbarHinweis,
       etappenErgebnisse,
+      fahrerRestLenkEnde: lauf.restPflichtpause, fahrerRestSchichtEnde: lauf.restSchichtzeit,
     };
   }
 
@@ -1393,7 +1469,11 @@
         const basis = k.bewertung;
         if (basis.effektivProKm == null || !k.fracht?.zielOrt || !basis.ankunftZeit) return;
         const belegt = new Set(holeJobIdsVonKandidat(k));
-        const folgeStatus = { ...fahrzeug.status, freiAbOrt: k.fracht.zielOrt, freiAbZeit: basis.ankunftZeit };
+        const folgeStatus = {
+          ...fahrzeug.status, freiAbOrt: k.fracht.zielOrt, freiAbZeit: basis.ankunftZeit,
+          fahrerRestOverride: (basis.fahrerRestLenkEnde != null && basis.fahrerRestSchichtEnde != null)
+            ? { restLenkzeitStunden: basis.fahrerRestLenkEnde, restSchichtzeitStunden: basis.fahrerRestSchichtEnde } : undefined,
+        };
         const gesamtKmErster = (basis.anfahrtKm ?? 0) + (k.fracht.entfernungKm ?? 0);
 
         const folgeKandidaten = [];
@@ -1862,11 +1942,7 @@
    * der Fallback, falls der Abruf scheitert oder auf 0 Disponenten passt.
    */
   let PLANUNGSFENSTER_STUNDEN = 24;
-  // Sicherheitsabstand zum Fensterende: unsere Schätzung des Beladungsstarts
-  // (Anfahrt-Distanz, Pausen) weicht um bis zu 1-2 h vom Spiel ab; ein Auftrag
-  // wird nur als "einplanbar" gewertet, wenn er auch bei dieser Abweichung noch
-  // im Planungsfenster liegt (Das Spiel lehnt sonst nach der Annahme ab).
-  const PLANUNG_PUFFER_STUNDEN = 3;
+  // Sicherheitsabstand zum Fensterende: siehe aktuellerPlanungspuffer() (aus Messungen).
 
   /**
    * Zählt die Disponenten in der Personalliste (/game/staff.php) - jede
@@ -3243,7 +3319,7 @@
                 if (beideKomplett && bewertung.einplanbar && etappe2Passt && kette.etappe1.jobId && kette.etappe2.jobId && eintrag.vehicleId && eintrag.freiAbZeit) {
                   html += `<button type="button" class="fi-dash-accept-btn fi-kette-btn"
                     data-job-a="${kette.etappe1.jobId}" data-job-b="${kette.etappe2.jobId}"
-                    data-vehicle-id="${eintrag.vehicleId}" data-frei-ab="${eintrag.freiAbZeit.toISOString()}"
+                    data-vehicle-id="${eintrag.vehicleId}" data-frei-ab="${eintrag.freiAbZeit.toISOString()}" data-beladung="${bewertung.beladungsStartZeit.toISOString()}"
                     data-route-a="${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt}" data-route-b="${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt}"
                     data-fahrzeug="${eintrag.fahrzeugName}"
                   >✅ Beide Etappen annehmen &amp; hintereinander einplanen</button>`;
@@ -3265,7 +3341,7 @@
               } else if (fracht.jobId && eintrag.vehicleId && eintrag.freiAbZeit) {
                 html += `<button type="button" class="fi-dash-accept-btn fi-accept-btn"
                   data-job-id="${fracht.jobId}" data-vehicle-id="${eintrag.vehicleId}"
-                  data-frei-ab="${eintrag.freiAbZeit.toISOString()}"
+                  data-frei-ab="${eintrag.freiAbZeit.toISOString()}" data-beladung="${bewertung.beladungsStartZeit.toISOString()}"
                   data-route="${fracht.startOrt} → ${fracht.zielOrt}" data-fahrzeug="${eintrag.fahrzeugName}"
                 >✅ Annehmen &amp; einplanen</button>`;
               }
@@ -3374,6 +3450,7 @@
     const urlaubGeloggt = new Set();
     const gesperrteFahrzeuge = new Set(); // Fahrzeuge, bei denen Annehmen/Einplanen scheiterte - nicht erneut versuchen (sonst häufen sich unverplante Aufträge)
 
+    log(`Sicherheitsabstand zum Fensterende: ${aktuellerPlanungspuffer().toFixed(1)} h (${ladePrognoseLog().length} Messungen von Prognose vs. Spiel-Plan).`);
     for (let runde = 1; runde <= MAX_RUNDEN; runde++) {
       if (abgebrochen()) { log('⏹ Vom Nutzer gestoppt.', 'fi-warn'); break; }
 
@@ -3467,7 +3544,7 @@
             f.status = { ...f.status, freiAbZeit: bewertung.ankunftZeit, freiAbOrt: fracht.zielOrt };
             log(`🧪 ${beschreibung}`, 'fi-good');
           } else {
-            await nimmFrachtAnUndPlaneEin(fracht.jobId, z.eintrag.vehicleId, freiAbVorher);
+            await nimmFrachtAnUndPlaneEin(fracht.jobId, z.eintrag.vehicleId, freiAbVorher, bewertung.beladungsStartZeit, fahrzeugName);
             letztesFreiAb.set(String(z.eintrag.vehicleId), freiAbVorher.getTime());
             log(`✅ ${beschreibung}`, 'fi-good');
           }
@@ -3496,7 +3573,7 @@
       if (btn.dataset.fiWired) return;
       btn.dataset.fiWired = '1';
       btn.addEventListener('click', async () => {
-        const { jobId, vehicleId, freiAb, route, fahrzeug } = btn.dataset;
+        const { jobId, vehicleId, freiAb, route, fahrzeug, beladung } = btn.dataset;
         const bestaetigt = window.confirm(
           `Fracht ${route} für ${fahrzeug} annehmen und einplanen?\n\n` +
           `Das ist verbindlich - bei Nichtlieferung droht die Vertragsstrafe.`
@@ -3506,7 +3583,7 @@
         const original = btn.textContent;
         btn.textContent = 'Wird eingeplant …';
         try {
-          await nimmFrachtAnUndPlaneEin(jobId, vehicleId, new Date(freiAb));
+          await nimmFrachtAnUndPlaneEin(jobId, vehicleId, new Date(freiAb), beladung ? new Date(beladung) : null, fahrzeug);
           btn.textContent = '✅ Angenommen & eingeplant';
           btn.style.background = '#2f6f3f';
           btn.style.color = '#fff';
@@ -3534,7 +3611,7 @@
         const original = btn.textContent;
         btn.textContent = 'Wird eingeplant …';
         try {
-          await nimmKetteAnUndPlaneEin(d.jobA, d.jobB, d.vehicleId, new Date(d.freiAb));
+          await nimmKetteAnUndPlaneEin(d.jobA, d.jobB, d.vehicleId, new Date(d.freiAb), d.beladung ? new Date(d.beladung) : null, d.fahrzeug);
           btn.textContent = '✅ Beide Etappen angenommen & eingeplant';
           btn.style.background = '#2f6f3f';
           btn.style.color = '#fff';
@@ -3731,7 +3808,7 @@
    * Nimmt EINEN Auftrag an und plant ihn ein - alles oder nichts: scheitert das
    * Einplanen, wird der Auftrag sofort zurückgegeben.
    */
-  async function nimmFrachtAnUndPlaneEin(jobId, vehicleId, freiAbZeit) {
+  async function nimmFrachtAnUndPlaneEin(jobId, vehicleId, freiAbZeit, prognoseBeladung = null, fahrzeugName = String(vehicleId)) {
     const orderId = await nimmAnUndHoleOrderId(jobId, vehicleId);
     try {
       await planeOrderEin(orderId, vehicleId, freiAbZeit);
@@ -3739,6 +3816,7 @@
       const probleme = await rolleBuchungZurueck({ angenommen: [orderId], vehicleId });
       throw new Error(rollbackFehlertext(`Einplanen abgelehnt: ${e.message}`, probleme, 1));
     }
+    if (prognoseBeladung) messePrognose(await fetchVehicleStatus(vehicleId), fahrzeugName, freiAbZeit, prognoseBeladung);
     return { orderId };
   }
 
@@ -3752,7 +3830,7 @@
    *     beide Aufträge zurückgeben (kostenlos in den ersten 15 Minuten)
    * Ergebnis: entweder beide Etappen eingeplant - oder gar nichts gebucht.
    */
-  async function nimmKetteAnUndPlaneEin(jobId1, jobId2, vehicleId, freiAbZeit) {
+  async function nimmKetteAnUndPlaneEin(jobId1, jobId2, vehicleId, freiAbZeit, prognoseBeladung = null, fahrzeugName = String(vehicleId)) {
     const angenommen = [];
     const geplant = [];
     try {
@@ -3763,6 +3841,7 @@
       geplant.push(angenommen[0]);
 
       const status = await fetchVehicleStatus(vehicleId);
+      messePrognose(status, fahrzeugName, freiAbZeit, prognoseBeladung);
       const frei2 = status?.freiAbZeit ?? null;
       if (!frei2 || frei2.getTime() <= freiAbZeit.getTime()) {
         throw new Error('Das neue "frei ab" des Fahrzeugs nach Etappe 1 konnte nicht eindeutig gelesen werden');
