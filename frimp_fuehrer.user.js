@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.38
+// @version      0.29.39
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.38';
+  const SCRIPT_VERSION = '0.29.39';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2491,7 +2491,11 @@
       const res = await fetch('/game/freight-contracts.php', { credentials: 'same-origin', cache: 'no-store' });
       const doc = safeParseHtml(await res.text());
       return Array.from(doc.querySelectorAll('article.contract-card, article')).map(a => {
-        const t = a.innerText.replace(/\s+/g, ' ').trim();
+        // Geparstes (nicht angezeigtes) HTML hat kein Layout: innerText fügt keine
+        // Leerzeichen zwischen Elementen ein -> Textknoten selbst mit Abstand verbinden.
+        const knoten = []; const walker = doc.createTreeWalker(a, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) { const tx = walker.currentNode.textContent.trim(); if (tx) knoten.push(tx); }
+        const t = knoten.join(' ').replace(/\s+/g, ' ').trim();
         const g = re => { const m = re.exec(t); return m ? m[1] : null; };
         const status = /Abgelaufen/.test(t) ? 'abgelaufen' : /Neues Angebot/.test(t) ? 'angebot' : 'sonstige';
         const route = /\d{2}:\d{2} (.+?) → (.+?) STRECKE/.exec(t);
