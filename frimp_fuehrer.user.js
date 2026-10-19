@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.45
+// @version      0.29.46
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.45';
+  const SCRIPT_VERSION = '0.29.46';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2859,8 +2859,7 @@
 
       <div id="fi-dash-fleet" class="fi-dash-grid"><div class="fi-empty">Lade Flotte …</div></div>
 
-      <h3>Frachtverträge – aktuelle Angebote</h3>
-      <div id="fi-dash-contracts" class="fi-dash-grid"><div class="fi-empty">Lade Frachtverträge …</div></div>
+      <div id="fi-dash-contracts" class="fi-dash-grid"></div>
 
       <h3>Frachtbörse – beste Routen berechnen</h3>
       <div class="fi-dash-controls">
@@ -2996,11 +2995,9 @@
       const urlaubsSperren = await fetchUrlaubsSperren();
       const kommendeUrlaube = [...urlaubsSperren.entries()].flatMap(([fzName, liste]) => liste.filter(u => u.bis > new Date()).map(u => ({ fzName, ...u })));
       if (kommendeUrlaube.length) {
-        html += `<div class="fi-dash-card" style="border-color: rgba(154,205,255,.35);">
-          <div class="fi-dash-card-title">🌴 ${kommendeUrlaube.length} Urlaub(e) vorgemerkt</div>
-          ${kommendeUrlaube.map(u => `<div class="fi-dash-row">${u.fahrer} · ${u.fzName}: ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')} <span class="fi-muted">(${u.status})</span></div>`).join('')}
-          <div class="fi-dash-row fi-muted">→ Automatische Touren enden samt Heimfahrt vor Urlaubsbeginn (Fahrzeug muss am Firmensitz sein).</div>
-        </div>`;
+        const kurz = d => d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+        html += `<div class="fi-dash-pills" style="grid-column: 1 / -1;">${kommendeUrlaube.map(u =>
+          `<div class="fi-dash-pill" data-fi-tip="${`Urlaub ${u.fahrer} (${u.status}): ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')}\nAutomatische Touren enden samt Heimfahrt vor Urlaubsbeginn.`.replace(/"/g, '&quot;')}">🌴 ${u.fahrer.split(' ').pop()} · ${u.fzName.split(' · ')[0]} · ${kurz(u.von)}–${kurz(u.bis)}${/offen/i.test(u.status) ? ' ?' : ''}</div>`).join('')}</div>`;
       }
 
       // Frachtverträge: nur ANZEIGE und Bewertung, keine Annahme - wie Abrufe im
@@ -3009,20 +3006,25 @@
       if (vertraegeEl) {
         const vertraege = (await fetchFrachtvertraege()).filter(v => v.status === 'angebot');
         const fleetTypisiert = baueFleetMitTyp(fleet, fuhrparkDetails, null);
-        vertraegeEl.innerHTML = vertraege.length ? vertraege.map(v => {
+        const zeilen = vertraege.map(v => {
           const b = bewerteVertrag(v, fleetTypisiert);
-          const passt = b.passende.length ? `✅ passende Fahrzeuge: ${b.passende.map(f => f.name.split(' · ')[0]).join(', ')}` : '❌ kein passendes Fahrzeug in der Flotte';
-          return `<div class="fi-dash-card">
-            <div class="fi-dash-card-title">📜 ${v.tier ? v.tier + ' · ' : ''}${v.name ?? 'Vertrag'}</div>
-            <div class="fi-dash-row"><strong>${v.von} → ${v.nach}</strong> (${v.streckeKm} km)</div>
-            <div class="fi-dash-row fi-muted">${v.setup ?? '?'} · Angebot gültig bis ${v.gueltigBis ?? '?'}</div>
-            <div class="fi-dash-row">${fmtEuro(v.verguetungProAbruf ?? 0)} je Abruf (${b.eurProKm != null ? b.eurProKm.toFixed(2) : '?'} €/km) · ${v.abrufeProTag}/Tag · Ziel ${v.zielAbrufe} Abrufe in ${v.laufzeitTage} Tagen</div>
-            <div class="fi-dash-row"><strong>${fmtEuro(b.umsatz)}</strong> Umsatz bei Zielerreichung + ${fmtEuro(v.bonus ?? 0)} Bonus (${b.bonusAnteilProzent != null ? b.bonusAnteilProzent.toFixed(1) : '?'} %)</div>
-            <div class="fi-dash-row fi-warn">⚠ Vertragsstrafe ${fmtEuro(v.strafe ?? 0)} (${b.risikoFaktor != null ? b.risikoFaktor.toFixed(1) : '?'}× ein Abruf) · 3. Fehlabruf = Vertrag scheitert</div>
-            <div class="fi-dash-row fi-muted">Etwa ${b.fahrzeugBedarf} Fahrzeug(e) nötig (Zyklus ~${b.zyklusTage.toFixed(1)} Tage je Abruf inkl. Rückfahrt)</div>
-            <div class="fi-dash-row ${b.passende.length ? 'fi-good' : 'fi-bad'}">${passt}</div>
-          </div>`;
-        }).join('') : '<div class="fi-empty">Keine neuen Vertragsangebote.</div>';
+          const kurzName = (v.name ?? 'Vertrag').replace(/^(Rahmenvertrag|Intensivvertrag):\s*/, '').trim();
+          const tip = [
+            `${v.name ?? 'Vertrag'}${v.tier ? ' (' + v.tier + ')' : ''}`,
+            `${v.von} → ${v.nach}, ${v.streckeKm} km, Setup: ${v.setup ?? '?'}`,
+            `${fmtEuro(v.verguetungProAbruf ?? 0)} je Abruf (${b.eurProKm != null ? b.eurProKm.toFixed(2) : '?'} €/km), ${v.abrufeProTag}/Tag, Ziel ${v.zielAbrufe} in ${v.laufzeitTage} Tagen`,
+            `Umsatz ${fmtEuro(b.umsatz)} + Bonus ${fmtEuro(v.bonus ?? 0)} (${b.bonusAnteilProzent != null ? b.bonusAnteilProzent.toFixed(1) : '?'} %)`,
+            `Vertragsstrafe ${fmtEuro(v.strafe ?? 0)} (${b.risikoFaktor != null ? b.risikoFaktor.toFixed(1) : '?'}x ein Abruf), 3. Fehlabruf = Vertrag scheitert`,
+            `Fahrzeugbedarf ca. ${b.fahrzeugBedarf} (Zyklus ~${b.zyklusTage.toFixed(1)} Tage je Abruf)`,
+            `Angebot gültig bis ${v.gueltigBis ?? '?'}`,
+          ].join('\n').replace(/"/g, '&quot;');
+          return `<div class="fi-dash-row" style="font-size:12px; margin:2px 0;" data-fi-tip="${tip}">${b.passende.length ? '✅' : '❌'} <strong>${kurzName}</strong> · ${v.von}→${v.nach} ${v.streckeKm} km · ${fmtEuro(v.verguetungProAbruf ?? 0)}/Abruf · ${v.zielAbrufe}× in ${v.laufzeitTage} T · ~${b.fahrzeugBedarf} Fz${b.passende.length ? '' : ' · <span class="fi-muted">kein passendes Fahrzeug</span>'}</div>`;
+        });
+        const passend = vertraege.filter(v => bewerteVertrag(v, fleetTypisiert).passende.length).length;
+        vertraegeEl.innerHTML = `<details style="grid-column: 1 / -1;">
+          <summary style="cursor:pointer; font-size:12px; color:#9aa5b8;">📜 Frachtverträge: ${vertraege.length} Angebot(e), ${passend} passend zur Flotte (antippen)</summary>
+          ${zeilen.join('') || '<div class="fi-empty">Keine neuen Vertragsangebote.</div>'}
+        </details>`;
       }
 
       // Die einzelnen Fahrzeugkarten sind auf Wunsch entfallen (die Timeline zeigt
