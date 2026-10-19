@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.32
+// @version      0.29.33
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.32';
+  const SCRIPT_VERSION = '0.29.33';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -723,7 +723,7 @@
    *   kapazitaetOk: boolean|null, kapazitaetHinweis: string|null
    * }}
    */
-  function bewerteFrachtFuerFahrzeug(fracht, vehicleStatus, liveStatus = null, aufbauTypLabel = 'Kleintransporter', fahrzeugStellplaetze = null) {
+  function bewerteFrachtFuerFahrzeug(fracht, vehicleStatus, liveStatus = null, aufbauTypLabel = 'Kleintransporter', fahrzeugStellplaetze = null, ladeKategorie = null) {
     if (!vehicleStatus || !vehicleStatus.freiAbOrt || !vehicleStatus.freiAbZeit) return null;
     if (!fracht.startOrt) return null;
 
@@ -753,8 +753,7 @@
     const lenkzeitUngeprueft = restLenkzeitStunden === null || restSchichtzeitStunden === null;
 
     const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
-    const ladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
-    const entladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
+    const { laden: ladeZeitStunden, entladen: entladeZeitStunden } = berechneLadeEntladeZeiten(fracht, spezifikation, fahreranzahl, fahrzeugStellplaetze, ladeKategorie);
     const geschwindigkeit = spezifikation.geschwindigkeitKmh ?? ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
 
     // Anfahrt ZUERST separat simulieren: der Beladungsstart ist freiAbZeit +
@@ -873,7 +872,7 @@
    * derselben Ankunftszeit ausgeliefert werden). Nutzt intern dieselbe
    * Bewertungslogik wie eine normale Einzelfracht.
    */
-  function bewerteBundleFuerFahrzeug(bundleFrachten, vehicleStatus, liveStatus, aufbauTypLabel, fahrzeugStellplaetze) {
+  function bewerteBundleFuerFahrzeug(bundleFrachten, vehicleStatus, liveStatus, aufbauTypLabel, fahrzeugStellplaetze, ladeKategorie = null) {
     const erste = bundleFrachten[0];
     const verguetungGesamt = bundleFrachten.reduce((sum, f) => sum + (f.verguetungEuro ?? 0), 0);
     const stellplaetzeGesamt = bundleFrachten.reduce((sum, f) => sum + (f.stellplaetzeBenoetigt ?? 0), 0);
@@ -890,7 +889,7 @@
       preisProKm: null, // pro Einzelauftrag nicht mehr aussagekräftig, siehe Bündel-Anzeige
     };
 
-    const bewertung = bewerteFrachtFuerFahrzeug(virtuelleFracht, vehicleStatus, liveStatus, aufbauTypLabel, fahrzeugStellplaetze);
+    const bewertung = bewerteFrachtFuerFahrzeug(virtuelleFracht, vehicleStatus, liveStatus, aufbauTypLabel, fahrzeugStellplaetze, ladeKategorie);
     return { fracht: virtuelleFracht, bewertung, bundleFrachten };
   }
 
@@ -936,7 +935,7 @@
    * Nutzt simuliereTourZeitplan zweimal nacheinander, wobei der Restzustand
    * (Lenkzeit/Schichtzeit) von Etappe 1 nahtlos in Etappe 2 weiterläuft.
    */
-  function bewerteKetteFuerFahrzeug(kette, vehicleStatus, liveStatus, aufbauTypLabel, fahrzeugStellplaetze) {
+  function bewerteKetteFuerFahrzeug(kette, vehicleStatus, liveStatus, aufbauTypLabel, fahrzeugStellplaetze, ladeKategorie = null) {
     const { etappe1, etappe2 } = kette;
     if (!vehicleStatus?.freiAbOrt || !vehicleStatus?.freiAbZeit) return null;
     if (!etappe1.startOrt || !etappe1.zielOrt || !etappe2.zielOrt) return null;
@@ -961,8 +960,8 @@
     const lenkzeitUngeprueft = restLenkzeitStunden === null || restSchichtzeitStunden === null;
 
     const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
-    const ladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
-    const entladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
+    const zeiten1 = berechneLadeEntladeZeiten(etappe1, spezifikation, fahreranzahl, fahrzeugStellplaetze, ladeKategorie);
+    const zeiten2 = berechneLadeEntladeZeiten(etappe2, spezifikation, fahreranzahl, fahrzeugStellplaetze, ladeKategorie);
     const geschwindigkeit = spezifikation.geschwindigkeitKmh ?? ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
 
     // Etappe 1: Anfahrt zuerst SEPARAT simulieren, um den echten Beladungsstart
@@ -972,9 +971,9 @@
     const beladungsStartZeit = new Date(vehicleStatus.freiAbZeit.getTime() + anfahrtErgebnis.gesamtStunden * 3600 * 1000);
 
     const restSegmenteEtappe1 = [
-      { dauer: ladeZeitStunden, istFahrt: false },
+      { dauer: zeiten1.laden, istFahrt: false },
       { dauer: fahrt1Km / geschwindigkeit, istFahrt: true },
-      { dauer: entladeZeitStunden, istFahrt: false },
+      { dauer: zeiten1.entladen, istFahrt: false },
     ];
     const restEtappe1 = simuliereTourZeitplan(restSegmenteEtappe1, fahreranzahl, anfahrtErgebnis.restPflichtpause, anfahrtErgebnis.restSchichtzeit);
     const teil1 = {
@@ -990,9 +989,9 @@
     // Anfahrt nötig, Etappe 1 endet exakt dort, wo Etappe 2 beginnt) -
     // Restzustand (Lenk-/Schichtzeit) von Etappe 1 läuft nahtlos weiter.
     const segmenteEtappe2 = [
-      { dauer: ladeZeitStunden, istFahrt: false },
+      { dauer: zeiten2.laden, istFahrt: false },
       { dauer: fahrt2Km / geschwindigkeit, istFahrt: true },
-      { dauer: entladeZeitStunden, istFahrt: false },
+      { dauer: zeiten2.entladen, istFahrt: false },
     ];
     const teil2 = simuliereTourZeitplan(segmenteEtappe2, fahreranzahl, teil1.restPflichtpause, teil1.restSchichtzeit);
     const ankunftZeit = new Date(zwischenankunft.getTime() + teil2.gesamtStunden * 3600 * 1000);
@@ -1139,7 +1138,7 @@
    * Fristen-Prüfung gegen ihre jeweils früheste Lieferfrist (bei gebündelten
    * Etappen: die früheste aller enthaltenen Aufträge).
    */
-  function bewerteMehrstufigeKetteFuerFahrzeug(etappen, vehicleStatus, liveStatus, aufbauTypLabel, fahrzeugStellplaetze) {
+  function bewerteMehrstufigeKetteFuerFahrzeug(etappen, vehicleStatus, liveStatus, aufbauTypLabel, fahrzeugStellplaetze, ladeKategorie = null) {
     if (!vehicleStatus?.freiAbOrt || !vehicleStatus?.freiAbZeit) return null;
     const erste = etappen[0];
     if (!erste.startOrt) return null;
@@ -1160,8 +1159,6 @@
     const lenkzeitUngeprueft = restLenkzeitStunden === null || restSchichtzeitStunden === null;
 
     const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
-    const ladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
-    const entladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
     const geschwindigkeit = spezifikation.geschwindigkeitKmh ?? ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
 
     const anfahrtSegment = [{ dauer: anfahrtKm / geschwindigkeit, istFahrt: true }];
@@ -1178,10 +1175,13 @@
 
     for (const etappe of etappen) {
       const fahrtKm = etappe.entfernungKm ?? 0;
+      const zeiten = berechneLadeEntladeZeiten(
+        { ...etappe.frachten[0], stellplaetzeBenoetigt: etappe.stellplaetzeGesamt },
+        spezifikation, fahreranzahl, fahrzeugStellplaetze, ladeKategorie);
       const segmente = [
-        { dauer: ladeZeitStunden, istFahrt: false },
+        { dauer: zeiten.laden, istFahrt: false },
         { dauer: fahrtKm / geschwindigkeit, istFahrt: true },
-        { dauer: entladeZeitStunden, istFahrt: false },
+        { dauer: zeiten.entladen, istFahrt: false },
       ];
       lauf = simuliereTourZeitplan(segmente, fahreranzahl, lauf.restPflichtpause, lauf.restSchichtzeit);
       uhrzeit = new Date(uhrzeit.getTime() + lauf.gesamtStunden * 3600 * 1000);
@@ -1280,7 +1280,7 @@
 
       const einzelBewertungen = angeboteFuerDirekt
         .map(fracht => {
-          const bewertung = bewerteFrachtFuerFahrzeug(fracht, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null);
+          const bewertung = bewerteFrachtFuerFahrzeug(fracht, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (bewertung && direktKm) {
             const gesamtFahrKm = bewertung.anfahrtKm + (fracht.entfernungKm ?? 0);
             bewertung.umwegProzent = Math.round(((gesamtFahrKm / direktKm) - 1) * 100);
@@ -1308,7 +1308,7 @@
       const kettenBewertungen = zielReferenzStadt
         ? baueKettenKandidaten(angebote, zielReferenzStadt, zielRadiusKm)
             .map(kette => {
-              const bewertung = bewerteKetteFuerFahrzeug(kette, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null);
+              const bewertung = bewerteKetteFuerFahrzeug(kette, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
               if (bewertung && direktKm) {
                 const gesamtFahrKm = bewertung.anfahrtKm + (kette.etappe1.entfernungKm ?? 0) + (kette.etappe2.entfernungKm ?? 0);
                 bewertung.umwegProzent = Math.round(((gesamtFahrKm / direktKm) - 1) * 100);
@@ -1337,7 +1337,7 @@
       const mehrstufigeKettenBewertungen = baueMehrstufigeKetten(legsProRoute, 3)
         .filter(etappen => !zielReferenzStadt || filtereNachZielstadt([{ zielOrt: etappen[etappen.length - 1].zielOrt }], zielReferenzStadt, zielRadiusKm).length > 0)
         .map(etappen => {
-          const bewertung = bewerteMehrstufigeKetteFuerFahrzeug(etappen, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null);
+          const bewertung = bewerteMehrstufigeKetteFuerFahrzeug(etappen, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (bewertung && direktKm) {
             const gesamtFahrKm = bewertung.anfahrtKm + etappen.reduce((s, e) => s + (e.entfernungKm ?? 0), 0);
             bewertung.umwegProzent = Math.round(((gesamtFahrKm / direktKm) - 1) * 100);
@@ -1401,7 +1401,7 @@
 
         let besteFolge = null;
         folgeKandidaten.slice(0, FOLGE_PRUEFEN).forEach(({ f }) => {
-          const bF = bewerteFrachtFuerFahrzeug(f, folgeStatus, frischeLive, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null);
+          const bF = bewerteFrachtFuerFahrzeug(f, folgeStatus, frischeLive, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (!bF || bF.schaffbar === false || bF.deckungsbeitragEuro == null) return;
           const paarKm = gesamtKmErster + bF.anfahrtKm + (f.entfernungKm ?? 0);
           if (paarKm <= 0) return;
@@ -1637,6 +1637,32 @@
     const gerundetMinuten = Math.round(rohMinuten / 5) * 5;
     const mindestMinuten = fahreranzahl >= 2 ? 10 : 15;
     return Math.max(gerundetMinuten, mindestMinuten) / 60;
+  }
+
+  /**
+   * Lade-/Entladezeit je Auftrag (beide in Stunden). Aus den vom Spiel selbst
+   * erzeugten Phasenplänen abgeleitet (2026-10-19):
+   *  - Getreidekipper: Laden 30 min, Entladen 10 min.
+   *  - Plane-Komplettladung: Laden 90 min (auch Solo-LKW); Entladen 60 min bei
+   *    "palettiert"-Ware, sonst 90 min (5 von 5 Beobachtungen - Hypothese).
+   *  - Teilladung: Wiki-Formel mit der Stellplatzzahl des AUFTRAGS (nicht des Fahrzeugs).
+   *  - Kleintransporter: fest 1 h; alles Übrige wie bisher (Formel, Fahrzeug-Stellplätze).
+   * @param {Object} fracht FrachtAngebot (oder Pseudo-Fracht mit kapazitaet/frachtName/stellplaetzeBenoetigt)
+   * @param {string|null} ladeKategorie Frachtbörsen-Kategorie des Fahrzeugs (Auflieger-Typ), nicht der Zugmaschine
+   */
+  function berechneLadeEntladeZeiten(fracht, spezifikation, fahreranzahl, fahrzeugStellplaetze, ladeKategorie = null) {
+    if (ladeKategorie === 'Getreidekipper') return { laden: 30 / 60, entladen: 10 / 60 };
+    if (spezifikation.ladeSystem === 'fix') {
+      const z = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
+      return { laden: z, entladen: z };
+    }
+    if (ladeKategorie === 'Tautliner / Plane' && fracht?.kapazitaet === 'Komplettladung') {
+      return { laden: 1.5, entladen: /palettiert/i.test(fracht.frachtName ?? '') ? 1.0 : 1.5 };
+    }
+    const stellplaetze = fracht?.kapazitaet === 'Teilladung' && fracht.stellplaetzeBenoetigt
+      ? fracht.stellplaetzeBenoetigt : fahrzeugStellplaetze;
+    const z = berechneLadeZeitStunden(spezifikation, fahreranzahl, stellplaetze);
+    return { laden: z, entladen: z };
   }
 
   /**
