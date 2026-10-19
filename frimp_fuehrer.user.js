@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.30
+// @version      0.29.31
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.30';
+  const SCRIPT_VERSION = '0.29.31';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3111,6 +3111,7 @@
     // Jobs werden lokal aus dem Pool entfernt statt neu zu scannen.
     const marktPools = new Map(); // kategorieLabel -> FrachtAngebot[] (nur Komplettladungen)
     const letztesFreiAb = new Map(); // vehicleId -> "frei ab" (ms) zum Zeitpunkt der letzten Beplanung
+    const gesperrteFahrzeuge = new Set(); // Fahrzeuge, bei denen Annehmen/Einplanen scheiterte - nicht erneut versuchen (sonst häufen sich unverplante Aufträge)
 
     for (let runde = 1; runde <= MAX_RUNDEN; runde++) {
       if (abgebrochen()) { log('⏹ Vom Nutzer gestoppt.', 'fi-warn'); break; }
@@ -3144,6 +3145,7 @@
         break;
       }
 
+      fleet = fleet.filter(f => !gesperrteFahrzeuge.has(String(f.status.vehicleId)));
       const kategorien = [...new Set(fleet.map(f => f.typ))];
       const zuweisungen = [];
 
@@ -3206,6 +3208,7 @@
           summeEuro += fracht.verguetungEuro ?? 0;
         } catch (e) {
           log(`❌ ${fahrzeugName}: ${fracht.startOrt} → ${fracht.zielOrt} fehlgeschlagen: ${e.message}`, 'fi-bad');
+          gesperrteFahrzeuge.add(String(z.eintrag.vehicleId));
           console.error('[FI-Helper] Befüllen: Fehler bei', fracht, e);
         }
         // Job in jedem Fall aus dem lokalen Pool nehmen (angenommen ODER fehlgeschlagen)
@@ -3315,23 +3318,29 @@
    * @param {string} vehicleId
    * @param {Date} freiAbZeit Geplanter Startzeitpunkt (frühestmöglich = Fahrzeug frei ab)
    */
+  async function holePoolOrderIds(vehicleId) {
+    const res = await fetch(`/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}`, { credentials: 'same-origin', cache: 'no-store' });
+    const doc = safeParseHtml(await res.text());
+    return Array.from(doc.querySelectorAll(SELECTORS.ordersPool)).map(c => c.dataset.orderId).filter(Boolean);
+  }
+
   async function nimmFrachtAnUndPlaneEin(jobId, vehicleId, freiAbZeit) {
+    // Pool VOR der Annahme merken: ein früher gescheiterter Auftrag kann noch
+    // darin liegen - "erste Karte im Pool" wäre dann der falsche Auftrag.
+    const poolVorher = new Set(await holePoolOrderIds(vehicleId));
     const acceptPayload = await nimmFrachtNurAn(jobId);
 
     // Manche Endpunkte liefern die neue Order-ID direkt mit - falls nicht,
-    // versuchen wir sie aus dem frischen Auftragspool der Dispositionsseite zu lesen.
+    // ist die neue ID die, die im Pool nach der Annahme dazugekommen ist.
     let orderId = acceptPayload.order_id || acceptPayload.dispatch_order_id || acceptPayload.id || null;
 
     if (!orderId) {
-      const dispatchRes = await fetch(`/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}`, { credentials: 'same-origin', cache: 'no-store' });
-      const dispatchHtml = await dispatchRes.text();
-      const doc = safeParseHtml(dispatchHtml);
-      const cards = Array.from(doc.querySelectorAll(SELECTORS.ordersPool));
-      const erste = cards[0]; // Heuristik: erster/neuester Auftrag im Pool - NICHT 100% sicher!
-      orderId = erste?.dataset?.orderId || null;
-      console.log('[FI-Helper] Order-ID-Fallback über Auftragspool:', orderId, cards);
+      const poolNachher = await holePoolOrderIds(vehicleId);
+      const neu = poolNachher.filter(id => !poolVorher.has(id));
+      orderId = neu.length === 1 ? neu[0] : null;
+      console.log('[FI-Helper] Order-ID über Pool-Differenz:', orderId, { vorher: [...poolVorher], nachher: poolNachher });
       if (!orderId) {
-        throw new Error('Fracht wurde angenommen, aber keine Order-ID zum Einplanen gefunden - bitte manuell in der Disposition zuweisen.');
+        throw new Error('Fracht wurde angenommen, aber die neue Order-ID ist nicht eindeutig - bitte manuell in der Disposition zuweisen.');
       }
     }
 
@@ -3346,20 +3355,22 @@
     planForm.append('planned_start_at', startDatumZeit);
     planForm.append('view_date', startDatum);
 
+    // Das Spiel antwortet auch bei Ablehnung mit einem Redirect + Flash-Meldung
+    // ("Planung fehlgeschlagen: ...", div.flash.error) - deshalb dem Redirect
+    // folgen und die Meldung lesen, statt jeden Redirect als Erfolg zu werten.
     const planRes = await fetch('/game/plan_dispatch_order.php', {
       method: 'POST',
       body: planForm,
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      redirect: 'manual',
     });
+    const planDoc = safeParseHtml(await planRes.text());
+    const fehler = planDoc.querySelector('.flash.error')?.textContent.replace(/\s+/g, ' ').trim();
+    const nochImPool = Array.from(planDoc.querySelectorAll(SELECTORS.ordersPool)).some(c => c.dataset.orderId === String(orderId));
+    console.log('[FI-Helper] plan_dispatch_order.php Antwort:', planRes.status, { fehler, nochImPool });
 
-    console.log('[FI-Helper] plan_dispatch_order.php Antwort:', planRes.status, planRes.type);
-
-    // redirect:'manual' liefert bei same-origin-Redirects oft status 0/opaqueredirect -
-    // das ist bei diesem Endpunkt (der normalerweise redirected) ein ERWARTETER Erfolgsfall.
-    if (!planRes.ok && planRes.type !== 'opaqueredirect' && planRes.status !== 0) {
-      throw new Error(`Einplanen fehlgeschlagen (HTTP ${planRes.status}) - Fracht wurde aber schon angenommen! Bitte manuell in der Disposition einplanen.`);
+    if (fehler || nochImPool) {
+      throw new Error(`Einplanen abgelehnt: ${fehler || 'Auftrag liegt weiterhin unverplant im Pool'} - der Auftrag (#${orderId}) wurde aber schon angenommen und liegt in der Disposition!`);
     }
 
     return { orderId };
