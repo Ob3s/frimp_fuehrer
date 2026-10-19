@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.39
+// @version      0.29.40
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.39';
+  const SCRIPT_VERSION = '0.29.40';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2498,23 +2498,23 @@
         const t = knoten.join(' ').replace(/\s+/g, ' ').trim();
         const g = re => { const m = re.exec(t); return m ? m[1] : null; };
         const status = /Abgelaufen/.test(t) ? 'abgelaufen' : /Neues Angebot/.test(t) ? 'angebot' : 'sonstige';
-        const route = /\d{2}:\d{2} (.+?) → (.+?) STRECKE/.exec(t);
+        const route = /\d{2}:\d{2} (.+?) → (.+?) Strecke/i.exec(t);
         return {
           status,
-          name: g(/((?:Rahmenvertrag|Intensivvertrag)[^·]*?)(?: · Rev|\s+Dauerkunde)/) ?? g(/((?:Rahmenvertrag|Intensivvertrag)[^·]*)/),
+          name: g(/((?:Rahmenvertrag|Intensivvertrag)[^·]*?)(?: · Rev|\s+Dauerkunde)/i) ?? g(/((?:Rahmenvertrag|Intensivvertrag)[^·]*)/i),
           tier: /^(Bronze|Silber|Gold)/.exec(t)?.[1] ?? null,
-          gueltigBis: g(/bis (\d{2}\.\d{2}\.\d{4} \d{2}:\d{2})/),
+          gueltigBis: g(/bis (\d{2}\.\d{2}\.\d{4} \d{2}:\d{2})/i),
           von: route?.[1] ?? null, nach: route?.[2] ?? null,
-          streckeKm: num(g(/STRECKE ([\d.]+) km/)),
-          preisProKm: num(g(/(?:KM-PREIS|STELLPLATZ-KM) ([\d,]+) €\/km/)),
-          stellplaetze: num(g(/LADUNG (\d+) Stellplätze/)),
-          setup: g(/BENÖTIGTES SETUP (.+?) LAUFZEIT/),
-          laufzeitTage: num(g(/LAUFZEIT (\d+) Tage/)),
-          abrufeProTag: num(g(/ABRUFE (\d+) pro Tag/)),
-          zielAbrufe: num(g(/ZIEL (\d+) Abrufe/)),
-          verguetungProAbruf: num(g(/VERGÜTUNG ([\d.,]+) €/)),
-          bonus: num(g(/BONUS ([\d.,]+) €/)),
-          strafe: num(g(/VERTRAGSSTRAFE ([\d.,]+) €/)),
+          streckeKm: num(g(/STRECKE ([\d.]+) km/i)),
+          preisProKm: num(g(/(?:KM-PREIS|STELLPLATZ-KM) ([\d,]+) €\/km/i)),
+          stellplaetze: num(g(/LADUNG (\d+) Stellplätze/i)),
+          setup: g(/BENÖTIGTES SETUP (.+?) LAUFZEIT/i),
+          laufzeitTage: num(g(/LAUFZEIT (\d+) Tage/i)),
+          abrufeProTag: num(g(/ABRUFE (\d+) pro Tag/i)),
+          zielAbrufe: num(g(/ZIEL (\d+) Abrufe/i)),
+          verguetungProAbruf: num(g(/VERGÜTUNG ([\d.,]+) €/i)),
+          bonus: num(g(/BONUS ([\d.,]+) €/i)),
+          strafe: num(g(/VERTRAGSSTRAFE ([\d.,]+) €/i)),
         };
       }).filter(v => v.status !== 'sonstige' || v.streckeKm);
     } catch (e) {
