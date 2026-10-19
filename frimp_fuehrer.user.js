@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.40
+// @version      0.29.41
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.40';
+  const SCRIPT_VERSION = '0.29.41';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -789,7 +789,7 @@
     // gegen freiAbZeit (Bugfix, siehe Chat - Fehlermeldung nannte explizit
     // "nächstmöglicher Beladungsstart").
     const planungsfensterEnde = new Date(Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000);
-    const einplanbar = beladungsStartZeit <= planungsfensterEnde;
+    const einplanbar = beladungsStartZeit.getTime() + PLANUNG_PUFFER_STUNDEN * 3600 * 1000 <= planungsfensterEnde.getTime();
     const einplanbarHinweis = einplanbar
       ? null
       : `Nächstmöglicher Beladungsstart (${beladungsStartZeit.toLocaleString('de-DE')}) liegt außerhalb des ${PLANUNGSFENSTER_STUNDEN}h-Planungsfensters (Fenster endet ${planungsfensterEnde.toLocaleString('de-DE')}) - noch nicht einplanbar, erst annehmen und später einplanen`;
@@ -1024,7 +1024,7 @@
     // Planungsfenster-Check: gegen den ECHTEN Beladungsstart prüfen, nicht
     // gegen freiAbZeit (Bugfix, siehe Chat).
     const planungsfensterEnde = new Date(Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000);
-    const einplanbar = beladungsStartZeit <= planungsfensterEnde;
+    const einplanbar = beladungsStartZeit.getTime() + PLANUNG_PUFFER_STUNDEN * 3600 * 1000 <= planungsfensterEnde.getTime();
     const einplanbarHinweis = einplanbar
       ? null
       : `Nächstmöglicher Beladungsstart (${beladungsStartZeit.toLocaleString('de-DE')}) liegt außerhalb des ${PLANUNGSFENSTER_STUNDEN}h-Planungsfensters (Fenster endet ${planungsfensterEnde.toLocaleString('de-DE')}) - noch nicht einplanbar, erst annehmen und später einplanen`;
@@ -1212,7 +1212,7 @@
     const anfahrtAnteilProzent = gesamtFahrKm > 0 ? Math.round((anfahrtKm / gesamtFahrKm) * 100) : null;
 
     const planungsfensterEnde = new Date(Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000);
-    const einplanbar = beladungsStartZeit <= planungsfensterEnde;
+    const einplanbar = beladungsStartZeit.getTime() + PLANUNG_PUFFER_STUNDEN * 3600 * 1000 <= planungsfensterEnde.getTime();
     const einplanbarHinweis = einplanbar
       ? null
       : `Nächstmöglicher Beladungsstart (${beladungsStartZeit.toLocaleString('de-DE')}) liegt außerhalb des ${PLANUNGSFENSTER_STUNDEN}h-Planungsfensters (Fenster endet ${planungsfensterEnde.toLocaleString('de-DE')}) - noch nicht einplanbar, erst annehmen und später einplanen`;
@@ -1862,6 +1862,11 @@
    * der Fallback, falls der Abruf scheitert oder auf 0 Disponenten passt.
    */
   let PLANUNGSFENSTER_STUNDEN = 24;
+  // Sicherheitsabstand zum Fensterende: unsere Schätzung des Beladungsstarts
+  // (Anfahrt-Distanz, Pausen) weicht um bis zu 1-2 h vom Spiel ab; ein Auftrag
+  // wird nur als "einplanbar" gewertet, wenn er auch bei dieser Abweichung noch
+  // im Planungsfenster liegt (Das Spiel lehnt sonst nach der Annahme ab).
+  const PLANUNG_PUFFER_STUNDEN = 3;
 
   /**
    * Zählt die Disponenten in der Personalliste (/game/staff.php) - jede
