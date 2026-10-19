@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.35
+// @version      0.29.36
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.35';
+  const SCRIPT_VERSION = '0.29.36';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3023,8 +3023,15 @@
                   html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${f.jobId}" data-route="${f.startOrt} → ${f.zielOrt}">✅ ${f.frachtName} annehmen</button>`;
                 });
               } else if (istKette) {
+                // Alles oder nichts: ein Knopf gibt es nur, wenn die GANZE Kette
+                // buchbar ist (beide Komplettladungen, Etappe 1 einplanbar UND
+                // der Start von Etappe 2 liegt - mit 2 h Sicherheitsabstand für
+                // die Schätzungenauigkeit - noch im Planungsfenster). Einzel-
+                // Annahme einer Kette-Etappe gibt es bewusst nicht mehr.
                 const beideKomplett = kette.etappe1.kapazitaet === 'Komplettladung' && kette.etappe2.kapazitaet === 'Komplettladung';
-                if (beideKomplett && bewertung.einplanbar && kette.etappe1.jobId && kette.etappe2.jobId && eintrag.vehicleId && eintrag.freiAbZeit) {
+                const fensterEndeMs = Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000;
+                const etappe2Passt = bewertung.zwischenankunft && (bewertung.zwischenankunft.getTime() + 2 * 3600 * 1000) <= fensterEndeMs;
+                if (beideKomplett && bewertung.einplanbar && etappe2Passt && kette.etappe1.jobId && kette.etappe2.jobId && eintrag.vehicleId && eintrag.freiAbZeit) {
                   html += `<button type="button" class="fi-dash-accept-btn fi-kette-btn"
                     data-job-a="${kette.etappe1.jobId}" data-job-b="${kette.etappe2.jobId}"
                     data-vehicle-id="${eintrag.vehicleId}" data-frei-ab="${eintrag.freiAbZeit.toISOString()}"
@@ -3032,9 +3039,10 @@
                     data-fahrzeug="${eintrag.fahrzeugName}"
                   >✅ Beide Etappen annehmen &amp; hintereinander einplanen</button>`;
                 } else {
-                  html += `<div class="fi-dash-row fi-muted" style="font-size:11px;">ℹ ${beideKomplett ? 'Etappe 1 liegt außerhalb des Planungsfensters' : 'Enthält Teilladungen (brauchen den Tourenplaner)'} - Etappen einzeln annehmen und später einplanen:</div>`;
-                  html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${kette.etappe1.jobId}" data-route="${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt}">✅ Etappe 1 annehmen</button>`;
-                  html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${kette.etappe2.jobId}" data-route="${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt}">✅ Etappe 2 annehmen</button>`;
+                  const grund = !beideKomplett ? 'enthält Teilladungen (brauchen den Tourenplaner)'
+                    : !bewertung.einplanbar ? 'Etappe 1 liegt außerhalb des Planungsfensters'
+                    : 'Etappe 2 würde außerhalb des Planungsfensters starten';
+                  html += `<div class="fi-dash-row fi-warn" style="font-size:12px;">🚫 Nicht automatisch buchbar: ${grund}. Es wird nichts halb gebucht.</div>`;
                 }
               } else if (istMehrstufigeKette) {
                 html += `<div class="fi-dash-row fi-muted" style="font-size:11px;">ℹ Alle Aufträge einzeln annehmen, dann im Tourenplaner unter "${etappen[0].startOrt} → ${etappen[etappen.length - 1].zielOrt}"-Kategorie zusammen auswählen - Belade-/Entladereihenfolge in der Reihenfolge der Etappen oben setzen:</div>`;
@@ -3303,17 +3311,15 @@
         const bestaetigt = window.confirm(
           `Kette für ${d.fahrzeug} annehmen und einplanen?\n\n` +
           `1) ${d.routeA}\n2) ${d.routeB}\n\n` +
-          `Beide Aufträge sind verbindlich - bei Nichtlieferung droht die Vertragsstrafe.`
+          `Alles oder nichts: klappt eine Etappe nicht, wird alles zurückgerollt. Sonst sind beide Aufträge verbindlich (Vertragsstrafe bei Nichtlieferung).`
         );
         if (!bestaetigt) return;
         btn.disabled = true;
         const original = btn.textContent;
         btn.textContent = 'Wird eingeplant …';
         try {
-          const ergebnis = await nimmKetteAnUndPlaneEin(d.jobA, d.jobB, d.vehicleId, new Date(d.freiAb));
-          btn.textContent = ergebnis.etappe2Geplant
-            ? '✅ Beide Etappen angenommen & eingeplant'
-            : `✅ Etappe 1 eingeplant, Etappe 2 angenommen (planbar ab ${ergebnis.frei2.toLocaleString('de-DE')})`;
+          await nimmKetteAnUndPlaneEin(d.jobA, d.jobB, d.vehicleId, new Date(d.freiAb));
+          btn.textContent = '✅ Beide Etappen angenommen & eingeplant';
           btn.style.background = '#2f6f3f';
           btn.style.color = '#fff';
         } catch (e) {
@@ -3391,34 +3397,15 @@
    * @param {string} vehicleId
    * @param {Date} freiAbZeit Geplanter Startzeitpunkt (frühestmöglich = Fahrzeug frei ab)
    */
-  /**
-   * Nimmt zwei Komplettladungen an und plant sie HINTEREINANDER auf dasselbe
-   * Fahrzeug: Etappe 1 wie gewohnt; danach wird das vom Spiel berechnete neue
-   * "frei ab" gelesen (das Spiel hängt manuelle Aktionen an die letzte Phase an)
-   * und Etappe 2 genau dort angesetzt. Etappe 2 wird erst NACH erfolgreicher
-   * Planung von Etappe 1 angenommen. Liegt der Start von Etappe 2 außerhalb des
-   * Planungsfensters, wird sie nur angenommen und später eingeplant.
-   */
-  async function nimmKetteAnUndPlaneEin(jobId1, jobId2, vehicleId, freiAbZeit) {
-    await nimmFrachtAnUndPlaneEin(jobId1, vehicleId, freiAbZeit);
-
-    const status = await fetchVehicleStatus(vehicleId);
-    const frei2 = status?.freiAbZeit ?? null;
-    if (!frei2 || frei2.getTime() <= freiAbZeit.getTime()) {
-      throw new Error('Etappe 1 ist eingeplant, aber das neue "frei ab" des Fahrzeugs konnte nicht eindeutig gelesen werden - Etappe 2 bitte einzeln annehmen und einplanen.');
-    }
-
-    const fensterEnde = Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000;
-    if (frei2.getTime() > fensterEnde) {
-      await nimmFrachtNurAn(jobId2);
-      return { etappe2Geplant: false, frei2 };
-    }
-
-    await nimmFrachtAnUndPlaneEin(jobId2, vehicleId, frei2).catch(e => {
-      throw new Error(`Etappe 1 ist eingeplant, Etappe 2 nicht: ${e.message}`);
-    });
-    return { etappe2Geplant: true, frei2 };
-  }
+  // ----- Annehmen / Einplanen / Zurückrollen --------------------------------
+  // Grundlage für "alles oder nichts" (siehe Chat 2026-10-19): Das Spiel erlaubt
+  // (a) die kostenlose Rückgabe eines angenommenen, noch ungeplanten Auftrags
+  // innerhalb von 15 Minuten (max. 3 kostenlose Rückgaben je 24 h, danach 15 %
+  // Gebühr bis 60 min) über return_dispatch_order_to_market.php und (b) das
+  // Entfernen einer eingeplanten, noch nicht gestarteten Tour über
+  // dispatch.php (dispatch_action=cancel_planned_order) - der Auftrag liegt
+  // danach wieder ungeplant im Pool. Daraus lässt sich jede Buchung bei einem
+  // Fehlschlag vollständig rückgängig machen.
 
   async function holePoolOrderIds(vehicleId) {
     const res = await fetch(`/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}`, { credentials: 'same-origin', cache: 'no-store' });
@@ -3426,40 +3413,34 @@
     return Array.from(doc.querySelectorAll(SELECTORS.ordersPool)).map(c => c.dataset.orderId).filter(Boolean);
   }
 
-  async function nimmFrachtAnUndPlaneEin(jobId, vehicleId, freiAbZeit) {
-    // Pool VOR der Annahme merken: ein früher gescheiterter Auftrag kann noch
-    // darin liegen - "erste Karte im Pool" wäre dann der falsche Auftrag.
+  /** Nimmt einen Auftrag an und liefert die neue Order-ID (aus der Antwort oder per Pool-Differenz). */
+  async function nimmAnUndHoleOrderId(jobId, vehicleId) {
     const poolVorher = new Set(await holePoolOrderIds(vehicleId));
-    const acceptPayload = await nimmFrachtNurAn(jobId);
-
-    // Manche Endpunkte liefern die neue Order-ID direkt mit - falls nicht,
-    // ist die neue ID die, die im Pool nach der Annahme dazugekommen ist.
-    let orderId = acceptPayload.order_id || acceptPayload.dispatch_order_id || acceptPayload.id || null;
-
+    const payload = await nimmFrachtNurAn(jobId);
+    let orderId = payload.order_id || payload.dispatch_order_id || payload.id || null;
     if (!orderId) {
-      const poolNachher = await holePoolOrderIds(vehicleId);
-      const neu = poolNachher.filter(id => !poolVorher.has(id));
+      const neu = (await holePoolOrderIds(vehicleId)).filter(id => !poolVorher.has(id));
       orderId = neu.length === 1 ? neu[0] : null;
-      console.log('[FI-Helper] Order-ID über Pool-Differenz:', orderId, { vorher: [...poolVorher], nachher: poolNachher });
-      if (!orderId) {
-        throw new Error('Fracht wurde angenommen, aber die neue Order-ID ist nicht eindeutig - bitte manuell in der Disposition zuweisen.');
-      }
     }
+    if (!orderId) {
+      throw new Error('Auftrag wurde angenommen, aber die neue Order-ID ist nicht eindeutig zu bestimmen.');
+    }
+    return String(orderId);
+  }
 
+  /** Plant einen angenommenen Auftrag ein und prüft die Antwort des Spiels strikt (Flash-Fehler/Pool). */
+  async function planeOrderEin(orderId, vehicleId, startZeit) {
     const pad = n => String(n).padStart(2, '0');
-    const startDatum = `${freiAbZeit.getFullYear()}-${pad(freiAbZeit.getMonth() + 1)}-${pad(freiAbZeit.getDate())}`;
-    const startDatumZeit = `${startDatum}T${pad(freiAbZeit.getHours())}:${pad(freiAbZeit.getMinutes())}`;
-
+    const startDatum = `${startZeit.getFullYear()}-${pad(startZeit.getMonth() + 1)}-${pad(startZeit.getDate())}`;
     const planForm = new URLSearchParams();
     planForm.append('order_id', orderId);
     planForm.append('partial_tour_id', '');
     planForm.append('vehicle_id', String(vehicleId));
-    planForm.append('planned_start_at', startDatumZeit);
+    planForm.append('planned_start_at', `${startDatum}T${pad(startZeit.getHours())}:${pad(startZeit.getMinutes())}`);
     planForm.append('view_date', startDatum);
 
-    // Das Spiel antwortet auch bei Ablehnung mit einem Redirect + Flash-Meldung
-    // ("Planung fehlgeschlagen: ...", div.flash.error) - deshalb dem Redirect
-    // folgen und die Meldung lesen, statt jeden Redirect als Erfolg zu werten.
+    // Das Spiel antwortet auch bei Ablehnung mit Redirect + Flash-Meldung
+    // (div.flash.error) - Redirect folgen und Meldung lesen.
     const planRes = await fetch('/game/plan_dispatch_order.php', {
       method: 'POST',
       body: planForm,
@@ -3469,13 +3450,115 @@
     const planDoc = safeParseHtml(await planRes.text());
     const fehler = planDoc.querySelector('.flash.error')?.textContent.replace(/\s+/g, ' ').trim();
     const nochImPool = Array.from(planDoc.querySelectorAll(SELECTORS.ordersPool)).some(c => c.dataset.orderId === String(orderId));
-    console.log('[FI-Helper] plan_dispatch_order.php Antwort:', planRes.status, { fehler, nochImPool });
-
+    console.log('[FI-Helper] plan_dispatch_order.php Antwort:', planRes.status, { orderId, fehler, nochImPool });
     if (fehler || nochImPool) {
-      throw new Error(`Einplanen abgelehnt: ${fehler || 'Auftrag liegt weiterhin unverplant im Pool'} - der Auftrag (#${orderId}) wurde aber schon angenommen und liegt in der Disposition!`);
+      throw new Error(fehler || 'Auftrag liegt nach dem Einplanen weiterhin unverplant im Pool');
     }
+  }
 
+  /** Gibt einen angenommenen, ungeplanten Auftrag an die Frachtbörse zurück (kostenlos in den ersten 15 Minuten). */
+  async function gibAuftragZurueck(orderId, vehicleId) {
+    const body = new URLSearchParams({
+      dispatch_order_id: String(orderId),
+      return_to: `/game/dispatch.php?date=${new Date().toISOString().slice(0, 10)}&vehicle_id=${vehicleId}`,
+      reason: 'Rückgabe aus der Disposition',
+    });
+    const res = await fetch('/game/return_dispatch_order_to_market.php', {
+      method: 'POST', body, credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+    const doc = safeParseHtml(await res.text());
+    const fehler = doc.querySelector('.flash.error')?.textContent.replace(/\s+/g, ' ').trim();
+    const nochImPool = Array.from(doc.querySelectorAll(SELECTORS.ordersPool)).some(c => c.dataset.orderId === String(orderId));
+    if (fehler || nochImPool) throw new Error(fehler || 'Auftrag liegt nach der Rückgabe weiterhin im Pool');
+    return doc.querySelector('.flash.success')?.textContent.replace(/\s+/g, ' ').trim() ?? 'zurückgegeben';
+  }
+
+  /** Entfernt eine eingeplante (noch nicht gestartete) Tour wieder aus dem Plan - der Auftrag liegt danach wieder im Pool. */
+  async function entferneEingeplanteTour(orderId, vehicleId) {
+    const body = new URLSearchParams({ dispatch_action: 'cancel_planned_order', dispatch_order_id: String(orderId), vehicle_id: String(vehicleId) });
+    const res = await fetch('/game/dispatch.php', {
+      method: 'POST', body, credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+    const doc = safeParseHtml(await res.text());
+    const fehler = doc.querySelector('.flash.error')?.textContent.replace(/\s+/g, ' ').trim();
+    const imPool = Array.from(doc.querySelectorAll(SELECTORS.ordersPool)).some(c => c.dataset.orderId === String(orderId));
+    if (fehler || !imPool) throw new Error(fehler || 'Tour wurde nicht aus dem Plan entfernt (Auftrag nicht im Pool)');
+  }
+
+  /**
+   * Macht eine begonnene Buchung rückgängig: erst eingeplante Touren aus dem
+   * Plan nehmen (in umgekehrter Reihenfolge), dann ALLE angenommenen Aufträge
+   * zurückgeben. Sammelt Fehler, statt beim ersten abzubrechen.
+   * @returns {Promise<string[]>} Liste der Rollback-Probleme (leer = vollständig zurückgerollt)
+   */
+  async function rolleBuchungZurueck({ geplant = [], angenommen = [], vehicleId }) {
+    const probleme = [];
+    for (const orderId of [...geplant].reverse()) {
+      try { await entferneEingeplanteTour(orderId, vehicleId); }
+      catch (e) { probleme.push(`Tour #${orderId} nicht aus dem Plan entfernt: ${e.message}`); }
+    }
+    for (const orderId of angenommen) {
+      if (probleme.some(pr => pr.includes(`#${orderId} `))) continue; // noch eingeplant -> Rückgabe unmöglich
+      try { await gibAuftragZurueck(orderId, vehicleId); }
+      catch (e) { probleme.push(`Auftrag #${orderId} nicht zurückgegeben: ${e.message}`); }
+    }
+    return probleme;
+  }
+
+  function rollbackFehlertext(grund, probleme, anzahl) {
+    return probleme.length
+      ? `${grund} - ROLLBACK UNVOLLSTÄNDIG, bitte manuell prüfen: ${probleme.join(' | ')}`
+      : `${grund} - es wurde nichts gebucht (${anzahl} Auftrag/Aufträge kostenlos zurückgerollt).`;
+  }
+
+  /**
+   * Nimmt EINEN Auftrag an und plant ihn ein - alles oder nichts: scheitert das
+   * Einplanen, wird der Auftrag sofort zurückgegeben.
+   */
+  async function nimmFrachtAnUndPlaneEin(jobId, vehicleId, freiAbZeit) {
+    const orderId = await nimmAnUndHoleOrderId(jobId, vehicleId);
+    try {
+      await planeOrderEin(orderId, vehicleId, freiAbZeit);
+    } catch (e) {
+      const probleme = await rolleBuchungZurueck({ angenommen: [orderId], vehicleId });
+      throw new Error(rollbackFehlertext(`Einplanen abgelehnt: ${e.message}`, probleme, 1));
+    }
     return { orderId };
+  }
+
+  /**
+   * Nimmt zwei Komplettladungen an und plant sie HINTEREINANDER auf dasselbe
+   * Fahrzeug - ALLES ODER NICHTS:
+   *  1. beide Aufträge annehmen (so sind beide gesichert, bevor geplant wird)
+   *  2. Etappe 1 einplanen, neues "frei ab" lesen (das Spiel hängt manuelle
+   *     Aktionen an die letzte Phase an), Etappe 2 genau dort einplanen
+   *  3. scheitert IRGENDETWAS: eingeplante Touren aus dem Plan nehmen und
+   *     beide Aufträge zurückgeben (kostenlos in den ersten 15 Minuten)
+   * Ergebnis: entweder beide Etappen eingeplant - oder gar nichts gebucht.
+   */
+  async function nimmKetteAnUndPlaneEin(jobId1, jobId2, vehicleId, freiAbZeit) {
+    const angenommen = [];
+    const geplant = [];
+    try {
+      angenommen.push(await nimmAnUndHoleOrderId(jobId1, vehicleId));
+      angenommen.push(await nimmAnUndHoleOrderId(jobId2, vehicleId));
+
+      await planeOrderEin(angenommen[0], vehicleId, freiAbZeit);
+      geplant.push(angenommen[0]);
+
+      const status = await fetchVehicleStatus(vehicleId);
+      const frei2 = status?.freiAbZeit ?? null;
+      if (!frei2 || frei2.getTime() <= freiAbZeit.getTime()) {
+        throw new Error('Das neue "frei ab" des Fahrzeugs nach Etappe 1 konnte nicht eindeutig gelesen werden');
+      }
+
+      await planeOrderEin(angenommen[1], vehicleId, frei2);
+      geplant.push(angenommen[1]);
+      return { orderIds: [...angenommen] };
+    } catch (e) {
+      const probleme = await rolleBuchungZurueck({ geplant, angenommen, vehicleId });
+      throw new Error(rollbackFehlertext(`Kette abgelehnt: ${e.message}`, probleme, angenommen.length));
+    }
   }
 
   // ============================================================
