@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.44
+// @version      0.29.45
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.44';
+  const SCRIPT_VERSION = '0.29.45';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2915,8 +2915,12 @@
       }
       Object.entries(stats).forEach(([k, v]) => { html += `<div class="fi-dash-pill">${k}: ${v}</div>`; });
       html += `<div class="fi-dash-pill">⛽ ${ASSUMPTIONS.dieselPreisProLiter.toFixed(3).replace('.', ',')} €/L${dieselPreisLive == null ? ' (Fallback)' : ''}</div>`;
+      html += `<button type="button" id="fi-sync-pill" class="fi-dash-pill" style="cursor:pointer;" title="Mitschnitt in privates GitHub-Repo hochladen (PC und Handy zusammen auswerten)">${syncPillText()}</button>`;
       const kopfEl = document.getElementById('fi-dash-header');
-      if (kopfEl) kopfEl.innerHTML = html;
+      if (kopfEl) {
+        kopfEl.innerHTML = html;
+        kopfEl.querySelector('#fi-sync-pill')?.addEventListener('click', () => { bedienSyncPill().catch(e => window.alert(`Sync: ${e.message}`)); });
+      }
     }
     await aktualisiereKopf();
 
@@ -4296,16 +4300,129 @@
     return neu;
   }
 
-  async function starteDatensammler() {
+  // ----- Sync in ein privates GitHub-Repo (PC UND Handy auswerten) -----
+  // Jedes Gerät hat seine eigene IndexedDB. Damit ich (Claude) alles gemeinsam
+  // auswerten kann, lädt jedes Gerät neue Daten als kleine JSON-Datei in das
+  // PRIVATE Repo Ob3s/frimp_daten (daten/<geraet>/<zeitstempel>.json). Nötig ist
+  // ein Fine-grained-Token mit Schreibrecht NUR auf dieses Repo, einmal je Gerät
+  // über den "☁ Sync"-Knopf im Dashboard eingegeben; es bleibt nur im localStorage
+  // dieses Browsers. Ohne Token wird nichts hochgeladen.
+  const SYNC_REPO = 'Ob3s/frimp_daten';
+  const SYNC_TOKEN_KEY = 'fi_sync_token';
+  const SYNC_STAND_KEY = 'fi_sync_stand';
+  const SYNC_STATUS_KEY = 'fi_sync_status';
+  const SYNC_GERAET_KEY = 'fi_geraet_id';
+
+  function holeGeraetId() {
+    let id = window.localStorage.getItem(SYNC_GERAET_KEY);
+    if (!id) {
+      const mobil = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+      id = `${mobil ? 'handy' : 'pc'}-${Math.random().toString(36).slice(2, 6)}`;
+      window.localStorage.setItem(SYNC_GERAET_KEY, id);
+    }
+    return id;
+  }
+  function setzeSyncStatus(ok, text) {
+    try { window.localStorage.setItem(SYNC_STATUS_KEY, JSON.stringify({ zeit: Date.now(), ok, text })); } catch (e) { /* egal */ }
+  }
+  function holeSyncStatus() {
+    try { return JSON.parse(window.localStorage.getItem(SYNC_STATUS_KEY) || 'null'); } catch (e) { return null; }
+  }
+  function utf8ZuBase64(text) {
+    const bytes = new TextEncoder().encode(text);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  }
+
+  /** Lädt alles seit dem letzten Sync hoch (Phasen nur wenn neu oder inzwischen abgeschlossen/verworfen). */
+  async function syncZuGithub(db) {
+    const token = window.localStorage.getItem(SYNC_TOKEN_KEY);
+    if (!token) return { uebersprungen: true };
+    const stand = parseInt(window.localStorage.getItem(SYNC_STAND_KEY) || '0', 10);
+    const jetzt = Date.now();
+    const [phasen, touren, snapshots] = await Promise.all([idbAlle(db, 'phasen'), idbAlle(db, 'touren'), idbAlle(db, 'snapshots')]);
+    const neuePhasen = phasen.filter(p => p.firstSeen > stand || (p.geschlossenAm ?? 0) > stand);
+    const neueTouren = touren.filter(t => t.erfasst > stand);
+    const neueSnaps = snapshots.filter(x => x.zeit > stand);
+    if (!neuePhasen.length && !neueTouren.length && !neueSnaps.length) return { hochgeladen: 0 };
+
+    const geraet = holeGeraetId();
+    const stuecke = [];
+    const MAX = 1500; // Einträge je Datei (hält jede Datei klar unter ~1 MB)
+    for (let i = 0; i < Math.max(neuePhasen.length, neueTouren.length, neueSnaps.length, 1); i += MAX) {
+      stuecke.push({
+        geraet, von: stand, bis: jetzt, teil: stuecke.length + 1,
+        phasen: neuePhasen.slice(i, i + MAX), touren: neueTouren.slice(i, i + MAX), snapshots: neueSnaps.slice(i, i + MAX),
+      });
+    }
+    for (const stueck of stuecke) {
+      const pfad = `daten/${geraet}/${new Date(jetzt).toISOString().replace(/[:.]/g, '-')}-${stueck.teil}.json`;
+      const res = await fetch(`https://api.github.com/repos/${SYNC_REPO}/contents/${pfad}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: `sync ${geraet}`, content: utf8ZuBase64(JSON.stringify(stueck)) }),
+      });
+      if (!res.ok) {
+        const grund = res.status === 401 || res.status === 403 ? 'Token ungültig/ohne Schreibrecht' : res.status === 404 ? 'Repo nicht gefunden (Token-Rechte?)' : `HTTP ${res.status}`;
+        throw new Error(grund);
+      }
+    }
+    window.localStorage.setItem(SYNC_STAND_KEY, String(jetzt));
+    return { hochgeladen: neuePhasen.length + neueTouren.length + neueSnaps.length };
+  }
+
+  /** Klick auf den "☁ Sync"-Pill im Dashboard: Token eingeben/ändern oder sofort synchronisieren. */
+  async function bedienSyncPill() {
+    const hat = !!window.localStorage.getItem(SYNC_TOKEN_KEY);
+    if (hat && window.confirm('Jetzt synchronisieren?\n\n(Abbrechen = Token ändern oder entfernen)')) {
+      await starteDatensammler(true);
+      return;
+    }
+    const eingabe = window.prompt(
+      `GitHub-Token (Fine-grained, NUR Repo ${SYNC_REPO}, Contents: Read and write) für dieses Gerät eingeben.\n` +
+      'Leer lassen und OK = Token entfernen, Abbrechen = nichts ändern.', '');
+    if (eingabe === null) return;
+    if (eingabe.trim()) {
+      window.localStorage.setItem(SYNC_TOKEN_KEY, eingabe.trim());
+      await starteDatensammler(true);
+    } else {
+      window.localStorage.removeItem(SYNC_TOKEN_KEY);
+      setzeSyncStatus(false, 'aus');
+    }
+  }
+
+  function syncPillText() {
+    const hat = !!window.localStorage.getItem(SYNC_TOKEN_KEY);
+    const st = holeSyncStatus();
+    if (!hat) return '☁ Sync: aus (Token fehlt)';
+    if (!st) return `☁ Sync: bereit (${holeGeraetId()})`;
+    const zeit = new Date(st.zeit).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+    return st.ok ? `☁ Sync ✓ ${zeit} (${holeGeraetId()})` : `☁ Sync ⚠ ${st.text}`;
+  }
+
+  async function starteDatensammler(erzwingen = false) {
     try {
-      if (!window.indexedDB || document.visibilityState === 'hidden') return;
+      if (!window.indexedDB || (!erzwingen && document.visibilityState === 'hidden')) return;
       const letzter = parseInt(window.localStorage.getItem(SAMMLER_ZEIT_KEY) || '0', 10);
-      if (Date.now() - letzter < SAMMLER_INTERVALL_MS) return;
+      if (!erzwingen && Date.now() - letzter < SAMMLER_INTERVALL_MS) return;
       window.localStorage.setItem(SAMMLER_ZEIT_KEY, String(Date.now())); // sofort setzen: andere Tabs überspringen
       const db = await oeffneSammlerDb();
       const phasen = await sammlePlanSnapshot(db);
       const touren = await sammleTourMeldungen(db);
       console.log(`[FI-Helper] Datensammler: ${phasen} Phasen-Einträge aktualisiert, ${touren} neue Tourmeldungen`);
+      try {
+        const sync = await syncZuGithub(db);
+        if (!sync.uebersprungen) {
+          setzeSyncStatus(true, `${sync.hochgeladen} Einträge`);
+          console.log(`[FI-Helper] Sync: ${sync.hochgeladen} Einträge hochgeladen`);
+        }
+      } catch (e) {
+        setzeSyncStatus(false, e.message);
+        console.warn('[FI-Helper] Sync fehlgeschlagen', e);
+      }
+      const pill = document.getElementById('fi-sync-pill');
+      if (pill) pill.textContent = syncPillText();
     } catch (e) {
       console.warn('[FI-Helper] Datensammler fehlgeschlagen', e);
     }
