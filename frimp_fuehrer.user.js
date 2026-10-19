@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.43
+// @version      0.29.44
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.43';
+  const SCRIPT_VERSION = '0.29.44';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -4126,6 +4126,192 @@
   }
 
   // ============================================================
+  // 6e. DATENSAMMLER - Pläne mitschneiden und gegen die Realität halten
+  //     Ziel (Nutzeridee 2026-10-20): eine Woche lang festhalten, WIE das
+  //     Spiel Touren plant (Phasen mit Start/Ende/Strecke) und danach mit dem
+  //     abgleichen, WIE gefahren wurde (Abschlussmeldungen im Posteingang:
+  //     echte Leer-/Lastkilometer, Diesel, Maut, Verschleiß). Daraus lassen
+  //     sich Geschwindigkeiten, Lade-/Pausenregeln und echte Distanzen
+  //     ableiten statt sie zu schätzen. Die Dispositionsseite zeigt vergangene
+  //     Phasen NICHT mehr - ohne Mitschnitt ist die Plan-Historie verloren.
+  //     Speicher: IndexedDB "frimp-log" (Seiten-Origin, per Konsole/Skript
+  //     auslesbar):
+  //       phasen  - jede je gesehene Phase (key = Fahrzeug|Typ|Start|Ende|von|bis)
+  //                 mit firstSeen/lastSeen; verschwindet sie VOR ihrem Ende,
+  //                 wurde sie umgeplant/entfernt (ausgang "verworfen"), sonst
+  //                 "abgeschlossen"
+  //       touren  - Abschlussmeldungen "Tour abgeschlossen" (Auftrag-ID, km, Diesel, ...)
+  //       snapshots - Zeitpunkte der Mitschnitte (Fahrzeuge mit "frei ab")
+  //     Läuft auf jeder Spielseite, höchstens alle 25 Minuten.
+  // ============================================================
+  const SAMMLER_DB_NAME = 'frimp-log';
+  const SAMMLER_INTERVALL_MS = 25 * 60 * 1000;
+  const SAMMLER_ZEIT_KEY = 'fi_sammler_letzter_lauf';
+
+  function oeffneSammlerDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(SAMMLER_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        db.createObjectStore('phasen', { keyPath: 'key' });
+        db.createObjectStore('touren', { keyPath: 'auftragId' });
+        db.createObjectStore('snapshots', { keyPath: 'zeit' });
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  function idbAlle(db, store) {
+    return new Promise((resolve, reject) => {
+      const req = db.transaction(store, 'readonly').objectStore(store).getAll();
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  function idbSchreibe(db, store, eintraege) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readwrite');
+      const st = tx.objectStore(store);
+      eintraege.forEach(e => st.put(e));
+      tx.oncomplete = () => resolve(eintraege.length);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  /** Text eines geparsten (nicht angezeigten) Elements mit Leerzeichen zwischen den Textknoten. */
+  function textMitAbstand(el) {
+    const teile = [];
+    const walker = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const t = walker.currentNode.textContent.trim();
+      if (t) teile.push(t);
+    }
+    return teile.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  async function sammlePlanSnapshot(db) {
+    const jetzt = Date.now();
+    const flotte = await fetchFleetStatus();
+    const abgerufene = new Set(flotte.filter(f => f.status?.vehicleId).map(f => String(f.status.vehicleId)));
+    const alle = await idbAlle(db, 'phasen');
+    const offene = new Map(alle.filter(p => !p.geschlossen).map(p => [p.key, p]));
+    const gesehen = new Set();
+    const zuSchreiben = [];
+
+    flotte.forEach(f => {
+      const vid = f.status?.vehicleId;
+      if (!vid) return;
+      (f.status.phasen ?? []).forEach(p => {
+        if (!p.start || !p.ende) return;
+        const key = `${vid}|${p.type}|${p.start.getTime()}|${p.ende.getTime()}|${p.von ?? ''}|${p.bis ?? ''}`;
+        gesehen.add(key);
+        const bekannt = offene.get(key);
+        if (bekannt) {
+          bekannt.lastSeen = jetzt;
+          bekannt.seen = (bekannt.seen ?? 1) + 1;
+          zuSchreiben.push(bekannt);
+        } else {
+          zuSchreiben.push({
+            key, vehicleId: String(vid), fahrzeug: f.name, type: p.type,
+            start: p.start.getTime(), ende: p.ende.getTime(), von: p.von ?? null, bis: p.bis ?? null,
+            auftrag: p.auftrag ?? null, status: p.status ?? null,
+            firstSeen: jetzt, lastSeen: jetzt, seen: 1, geschlossen: false,
+          });
+        }
+      });
+    });
+
+    // Verschwundene Phasen (nur bei Fahrzeugen, deren Abruf geklappt hat)
+    offene.forEach(p => {
+      if (gesehen.has(p.key) || !abgerufene.has(p.vehicleId)) return;
+      p.geschlossen = true;
+      p.geschlossenAm = jetzt;
+      p.ausgang = p.ende <= jetzt + 60000 ? 'abgeschlossen' : 'verworfen';
+      zuSchreiben.push(p);
+    });
+
+    await idbSchreibe(db, 'phasen', zuSchreiben);
+    await idbSchreibe(db, 'snapshots', [{
+      zeit: jetzt,
+      fahrzeuge: flotte.filter(f => f.status?.vehicleId).map(f => ({
+        vehicleId: String(f.status.vehicleId), name: f.name,
+        freiAbOrt: f.status.freiAbOrt ?? null, freiAbZeit: f.status.freiAbZeit?.getTime() ?? null, status: f.status.rohStatus ?? null,
+        phasen: (f.status.phasen ?? []).length,
+      })),
+    }]);
+    return zuSchreiben.length;
+  }
+
+  function parseTourMeldung(artikel) {
+    const t = textMitAbstand(artikel);
+    const zahl = s => (s == null ? null : parseFloat(String(s).replace(/\./g, '').replace(',', '.')));
+    const g = re => { const m = re.exec(t); return m ? m : null; };
+    const auftrag = g(/Auftrag #(\d+) erfüllt/);
+    if (!auftrag) return null;
+    const empf = g(/Empfangen am (\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2})/);
+    const maut = g(/LKW-Maut: ([\d.,]+) € \(([\d.,]+) km x ([\d.,]+) EUR\/km\)/);
+    const tank = g(/Automatisch getankt: ([\d.,]+) L fuer ([\d.,]+) €/);
+    const stand = g(/Kilometerstand: ([\d.]+) km -> ([\d.]+) km/);
+    const route = g(/Route: (.+?) -> (.+?) Leerfahrt:/);
+    return {
+      auftragId: auftrag[1],
+      empfangen: empf ? new Date(+empf[3], +empf[2] - 1, +empf[1], +empf[4], +empf[5]).getTime() : null,
+      ware: g(/Tour abgeschlossen: (.+?) Empfangen/)?.[1] ?? null,
+      fahrzeug: g(/Gefahren mit: (.+?) →/)?.[1] ?? null,
+      von: route?.[1] ?? null, nach: route?.[2] ?? null,
+      leerKm: zahl(g(/Leerfahrt: ([\d.,]+) km/)?.[1]),
+      lastKm: zahl(g(/Lastfahrt: ([\d.,]+) km/)?.[1]),
+      gesamtKm: zahl(g(/Gesamtstrecke: ([\d.,]+) km/)?.[1]),
+      dieselVerbrauchL: zahl(g(/Dieselverbrauch: ([\d.,]+) L/)?.[1]),
+      getanktL: zahl(tank?.[1]), tankEuro: zahl(tank?.[2]),
+      mautEuro: zahl(maut?.[1]), mautKm: zahl(maut?.[2]), mautSatz: zahl(maut?.[3]),
+      verguetungBrutto: zahl(g(/Frachtverguetung brutto: ([\d.,]+) €/)?.[1]),
+      puenktlich: /Puenktlich geliefert/.test(t),
+      ergebnisEuro: zahl(g(/Ergebnis nach Diesel und Maut: ([\d.,]+) €/)?.[1]),
+      kmVorher: zahl(stand?.[1]), kmNachher: zahl(stand?.[2]),
+      verschleiss: {
+        reifen: zahl(g(/Reifen: [\d.,]+ % -> [\d.,]+ % \(([-\d.,]+) %\)/)?.[1]),
+        bremsen: zahl(g(/Bremsen: [\d.,]+ % -> [\d.,]+ % \(([-\d.,]+) %\)/)?.[1]),
+        kupplung: zahl(g(/Kupplung: [\d.,]+ % -> [\d.,]+ % \(([-\d.,]+) %\)/)?.[1]),
+        motor: zahl(g(/Motor: [\d.,]+ % -> [\d.,]+ % \(([-\d.,]+) %\)/)?.[1]),
+      },
+      erfasst: Date.now(),
+    };
+  }
+
+  async function sammleTourMeldungen(db) {
+    const bekannte = new Set((await idbAlle(db, 'touren')).map(t => String(t.auftragId)));
+    let neu = 0;
+    for (let seite = 1; seite <= 40; seite++) {
+      const res = await fetch(`/game/inbox.php?filter=dispatch&page=${seite}`, { credentials: 'same-origin', cache: 'no-store' });
+      if (!res.ok) break;
+      const doc = safeParseHtml(await res.text());
+      const artikel = Array.from(doc.querySelectorAll('article'));
+      if (!artikel.length) break;
+      const touren = artikel.map(parseTourMeldung).filter(t => t && !bekannte.has(t.auftragId));
+      if (!touren.length) break; // nur noch Bekanntes -> fertig
+      touren.forEach(t => bekannte.add(t.auftragId));
+      neu += await idbSchreibe(db, 'touren', touren);
+    }
+    return neu;
+  }
+
+  async function starteDatensammler() {
+    try {
+      if (!window.indexedDB || document.visibilityState === 'hidden') return;
+      const letzter = parseInt(window.localStorage.getItem(SAMMLER_ZEIT_KEY) || '0', 10);
+      if (Date.now() - letzter < SAMMLER_INTERVALL_MS) return;
+      window.localStorage.setItem(SAMMLER_ZEIT_KEY, String(Date.now())); // sofort setzen: andere Tabs überspringen
+      const db = await oeffneSammlerDb();
+      const phasen = await sammlePlanSnapshot(db);
+      const touren = await sammleTourMeldungen(db);
+      console.log(`[FI-Helper] Datensammler: ${phasen} Phasen-Einträge aktualisiert, ${touren} neue Tourmeldungen`);
+    } catch (e) {
+      console.warn('[FI-Helper] Datensammler fehlgeschlagen', e);
+    }
+  }
+
+  // ============================================================
   // 7. INIT
   // ============================================================
   // Der Helper läuft AUSSCHLIESSLICH als Cockpit auf active_tours.php -
@@ -4141,6 +4327,12 @@
     initPersonalboerseWertung();
   } else if (/\/game\/truck-catalog\.php/.test(location.pathname)) {
     ergaenzeFehlendeFahrzeuge();
+  }
+
+  // Datensammler auf jeder eingeloggten Spielseite (verzögert, damit die Seite
+  // zuerst fertig lädt; Login-/Startseiten ausgenommen)
+  if (/\/game\//.test(location.pathname)) {
+    setTimeout(starteDatensammler, 8000);
   }
 
 })();
