@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.41
+// @version      0.29.42
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.41';
+  const SCRIPT_VERSION = '0.29.42';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -1906,6 +1906,33 @@
   async function aktualisierePlanungsfenster(erzwingeNeuladen = false) {
     const anzahlDisponenten = await fetchDisponentenAnzahl(erzwingeNeuladen);
     PLANUNGSFENSTER_STUNDEN = 24 * (1 + anzahlDisponenten);
+
+    // Exaktes Fensterende direkt vom Spiel: ein absichtlich unmöglicher
+    // Planungsversuch (nicht existierende Auftrags-/Fahrzeug-ID, Start weit in
+    // der Zukunft) wird mit "Maximal erlaubt bis TT.MM.JJJJ HH:MM" abgelehnt -
+    // bucht und ändert nichts. Überschreibt die Berechnung aus der
+    // Disponenten-Anzahl (die z.B. nach einer Einstellung veraltet wäre).
+    try {
+      const start = new Date(Date.now() + 240 * 3600 * 1000);
+      const pad = n => String(n).padStart(2, '0');
+      const datum = `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`;
+      const res = await fetch('/game/plan_dispatch_order.php', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ order_id: '999999999', partial_tour_id: '', vehicle_id: '999999999', planned_start_at: `${datum}T${pad(start.getHours())}:${pad(start.getMinutes())}`, view_date: datum }),
+      });
+      const doc = safeParseHtml(await res.text());
+      const text = doc.querySelector('.flash.error')?.textContent ?? '';
+      const m = /Maximal erlaubt bis (\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2})/.exec(text);
+      if (m) {
+        const ende = new Date(+m[3], +m[2] - 1, +m[1], +m[4], +m[5]);
+        const stunden = (ende.getTime() - Date.now()) / 3600000;
+        if (stunden > 1 && stunden < 24 * 30) PLANUNGSFENSTER_STUNDEN = stunden;
+      }
+    } catch (e) {
+      console.warn('[FI-Helper] Exaktes Planungsfenster nicht lesbar - Berechnung aus Disponenten-Anzahl bleibt', e);
+    }
   }
 
   /**
