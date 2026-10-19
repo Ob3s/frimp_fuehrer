@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.36
+// @version      0.29.37
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.36';
+  const SCRIPT_VERSION = '0.29.37';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -1356,7 +1356,15 @@
         })
         .filter(x => x.bewertung !== null);
 
-      const bewertungen = [...einzelBewertungen, ...bundleBewertungen, ...kettenBewertungen, ...mehrstufigeKettenBewertungen];
+      // Urlaub: nichts planen, das mit einem (beantragten) Urlaub eines Fahrers
+      // des Fahrzeugs kollidiert (Tour + Heimfahrt muss vor Urlaubsbeginn enden).
+      let urlaubHinweis = null;
+      const bewertungen = [...einzelBewertungen, ...bundleBewertungen, ...kettenBewertungen, ...mehrstufigeKettenBewertungen]
+        .filter(k => {
+          const grund = urlaubskonflikt(fahrzeug, k.fracht?.zielOrt, k.bewertung?.ankunftZeit);
+          if (grund && !urlaubHinweis) urlaubHinweis = grund;
+          return !grund;
+        });
 
       // Fristen-Einhaltung bleibt eine WEICHE Präferenz - lieber eine knapp
       // verpasste Frist zeigen als gar nichts, das ist informativ statt gefährlich.
@@ -1403,6 +1411,7 @@
         folgeKandidaten.slice(0, FOLGE_PRUEFEN).forEach(({ f }) => {
           const bF = bewerteFrachtFuerFahrzeug(f, folgeStatus, frischeLive, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (!bF || bF.schaffbar === false || bF.deckungsbeitragEuro == null) return;
+          if (urlaubskonflikt(fahrzeug, f.zielOrt, bF.ankunftZeit)) return;
           const paarKm = gesamtKmErster + bF.anfahrtKm + (f.entfernungKm ?? 0);
           if (paarKm <= 0) return;
           const paarEff = (basis.deckungsbeitragEuro + bF.deckungsbeitragEuro) / paarKm;
@@ -1428,6 +1437,7 @@
         kandidatenRangliste: kandidaten.slice(0, 8),
         hatSchaffbareOption: schaffbare.length > 0,
         anzahlBewertet: bewertungen.length,
+        urlaubHinweis,
       };
     });
   }
@@ -1486,6 +1496,7 @@
       verdraengt: zugewiesenerRang[i] != null && zugewiesenerRang[i] > 0,
       hatSchaffbareOption: eintrag.hatSchaffbareOption,
       anzahlBewertet: eintrag.anzahlBewertet,
+      urlaubHinweis: eintrag.urlaubHinweis ?? null,
     }));
   }
 
@@ -2463,13 +2474,71 @@
    * Auflieger (frachtKategorie), NICHT vom Zugmaschinen-Modell; ohne Auflieger
    * bleibt es beim eigenen Fahrzeugtyp. fallbackLabel greift, wenn nichts erkannt wurde.
    */
-  function baueFleetMitTyp(fleetMitLive, detailsMap, fallbackLabel) {
+  /**
+   * Urlaub der Fahrer (staff.php): pro Fahrer-Karte steht z.B.
+   * "Urlaubsantrag offen · 27.10.–29.10.2026" (genehmigte Urlaube vermutlich
+   * "Urlaub genehmigt · ..." - Text noch nicht beobachtet, deshalb allgemein
+   * gelesen) plus das zugewiesene Fahrzeug ("Fahrzeug PL 01 · B-SAN 4 eingesetzt").
+   * Regeln laut Posteingang: Ein Urlaub unterbricht KEINE bestehende Tour, bei
+   * Überschneidung wird die Genehmigung abgelehnt, und am Urlaubsbeginn müssen
+   * Fahrer UND Fahrzeug am Firmensitz sein. Beantragte (offene) Urlaube werden
+   * vorsorglich wie genehmigte behandelt, damit eine spätere Genehmigung nie an
+   * einer von uns geplanten Tour scheitert.
+   * @returns {Promise<Map<string, {fahrer: string, von: Date, bis: Date, status: string}[]>>} Schlüssel = Fahrzeugname
+   */
+  async function fetchUrlaubsSperren() {
+    const sperren = new Map();
+    try {
+      const res = await fetch('/game/staff.php', { credentials: 'same-origin', cache: 'no-store' });
+      const doc = safeParseHtml(await res.text());
+      doc.querySelectorAll('article').forEach(card => {
+        const t = card.innerText.replace(/\s+/g, ' ').trim();
+        const m = /Urlaub(?:santrag)?\s+([A-Za-zäöüß]+)\s*·\s*(\d{2})\.(\d{2})\.\s*[–-]\s*(\d{2})\.(\d{2})\.(\d{4})/.exec(t);
+        const fz = /Fahrzeug\s+(.+?)\s+eingesetzt/.exec(t);
+        if (!m || !fz) return;
+        const jahrEnde = parseInt(m[6], 10);
+        const jahrStart = parseInt(m[3], 10) > parseInt(m[5], 10) ? jahrEnde - 1 : jahrEnde;
+        const von = new Date(jahrStart, parseInt(m[3], 10) - 1, parseInt(m[2], 10), 0, 0, 0);
+        const bis = new Date(jahrEnde, parseInt(m[5], 10) - 1, parseInt(m[4], 10), 23, 59, 59);
+        const fahrer = /^(.+?)\s+(?:Fahrer|Disponent)\b/.exec(t)?.[1] ?? 'Fahrer';
+        const liste = sperren.get(fz[1].trim()) ?? [];
+        liste.push({ fahrer, von, bis, status: m[1] });
+        sperren.set(fz[1].trim(), liste);
+      });
+    } catch (e) {
+      console.warn('[FI-Helper] Urlaubsdaten konnten nicht geladen werden', e);
+    }
+    return sperren;
+  }
+
+  /**
+   * Prüft, ob eine Tour mit einem bevorstehenden Urlaub kollidiert: Sie muss
+   * samt Heimfahrt zum Firmensitz VOR Urlaubsbeginn beendet sein (Urlaub
+   * beginnt um 00:00 des Starttags; Heimfahrt-Schätzung mit 20 % Zuschlag für
+   * Pausen). Bereits laufende/vergangene Urlaube zählen nicht.
+   * @returns {string|null} Begründung, falls unzulässig
+   */
+  function urlaubskonflikt(fahrzeug, zielOrt, endeZeit) {
+    const urlaube = (fahrzeug.urlaub ?? []).filter(u => u.bis > new Date());
+    if (!urlaube.length || !endeZeit) return null;
+    const heimat = parseFirmenstandort() || 'Berlin';
+    const spez = holeFahrzeugSpezifikation(fahrzeug.verbrauchsTyp ?? fahrzeug.typ);
+    const kmh = spez.geschwindigkeitKmh ?? ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
+    const heimKm = zielOrt && zielOrt !== heimat ? geschaetzteStrassenKm(zielOrt, heimat) : 0;
+    const heimStunden = heimKm == null ? 0 : (heimKm / kmh) * 1.2;
+    const daheim = new Date(endeZeit.getTime() + heimStunden * 3600 * 1000);
+    const u = urlaube.find(x => daheim > x.von);
+    return u ? `Urlaub ${u.fahrer} ab ${u.von.toLocaleDateString('de-DE')} (${u.status}) - Tour samt Heimfahrt wäre erst ${daheim.toLocaleString('de-DE')} zu Ende` : null;
+  }
+
+  function baueFleetMitTyp(fleetMitLive, detailsMap, fallbackLabel, urlaubNachFahrzeug = new Map()) {
     return fleetMitLive.map(f => {
       const details = f.status?.vehicleId ? detailsMap.get(String(f.status.vehicleId)) : null;
       const typ = normalisiereFahrzeugtyp(details?.frachtKategorie || details?.typ) || fallbackLabel;
       return {
         ...f,
         typ,
+        urlaub: urlaubNachFahrzeug.get(f.name) ?? [],
         verbrauchsTyp: normalisiereFahrzeugtyp(details?.typ) || typ,
         stellplaetze: details?.stellplaetze ?? holeFahrzeugSpezifikation(details?.frachtKategorie || details?.typ || fallbackLabel).stellplaetzeGesamt ?? null,
       };
@@ -2736,6 +2805,18 @@
         </div>`;
       }
 
+      // Bevorstehende Urlaube (auch beantragte) - die automatische Planung
+      // berücksichtigt sie bereits (siehe urlaubskonflikt).
+      const urlaubsSperren = await fetchUrlaubsSperren();
+      const kommendeUrlaube = [...urlaubsSperren.entries()].flatMap(([fzName, liste]) => liste.filter(u => u.bis > new Date()).map(u => ({ fzName, ...u })));
+      if (kommendeUrlaube.length) {
+        html += `<div class="fi-dash-card" style="border-color: rgba(154,205,255,.35);">
+          <div class="fi-dash-card-title">🌴 ${kommendeUrlaube.length} Urlaub(e) vorgemerkt</div>
+          ${kommendeUrlaube.map(u => `<div class="fi-dash-row">${u.fahrer} · ${u.fzName}: ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')} <span class="fi-muted">(${u.status})</span></div>`).join('')}
+          <div class="fi-dash-row fi-muted">→ Automatische Touren enden samt Heimfahrt vor Urlaubsbeginn (Fahrzeug muss am Firmensitz sein).</div>
+        </div>`;
+      }
+
       // Die einzelnen Fahrzeugkarten sind auf Wunsch entfallen (die Timeline zeigt
       // alles); übrig bleibt die Warnung für Fahrzeuge ohne Fahrer plus die
       // Verschleiß/HU-Warnung oben.
@@ -2909,7 +2990,7 @@
           Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null }))),
           fetchFuhrparkDetails(erzwingeNeuladen),
         ]);
-        const fleet = baueFleetMitTyp(fleetMitLive, detailsMap, kategorieLabel);
+        const fleet = baueFleetMitTyp(fleetMitLive, detailsMap, kategorieLabel, await fetchUrlaubsSperren());
 
         // WICHTIG: passende bleibt bewusst UNGEFILTERT nach Zielort - die
         // Ketten-Suche braucht genau diese Breite, um Zwischenetappen zu
@@ -2962,7 +3043,7 @@
               : `🚐 ${eintrag.fahrzeugName}`;
             html += `<div class="fi-dash-card"><div class="fi-dash-card-title">${titel}</div>`;
             if (!eintrag.beste) {
-              html += `<div class="fi-dash-row fi-warn">Keine bewertbare Fracht (Stadt evtl. nicht in Koordinatentabelle).</div>`;
+              html += `<div class="fi-dash-row fi-warn">${eintrag.urlaubHinweis ? '🌴 Keine Tour wegen Urlaub: ' + eintrag.urlaubHinweis : 'Keine bewertbare Fracht (Stadt evtl. nicht in Koordinatentabelle).'}</div>`;
             } else {
               const { fracht, bewertung, istBundle, bundleFrachten, istKette, kette, istMehrstufigeKette, etappen } = eintrag.beste;
               const schaffbarIcon = bewertung.schaffbar === true ? '✅' : bewertung.schaffbar === false ? '❌' : '❔';
@@ -3162,6 +3243,7 @@
     // Jobs werden lokal aus dem Pool entfernt statt neu zu scannen.
     const marktPools = new Map(); // kategorieLabel -> FrachtAngebot[] (nur Komplettladungen)
     const letztesFreiAb = new Map(); // vehicleId -> "frei ab" (ms) zum Zeitpunkt der letzten Beplanung
+    const urlaubGeloggt = new Set();
     const gesperrteFahrzeuge = new Set(); // Fahrzeuge, bei denen Annehmen/Einplanen scheiterte - nicht erneut versuchen (sonst häufen sich unverplante Aufträge)
 
     for (let runde = 1; runde <= MAX_RUNDEN; runde++) {
@@ -3178,7 +3260,7 @@
           Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null }))),
           fetchFuhrparkDetails(true),
         ]);
-        fleet = baueFleetMitTyp(fleetMitLive, detailsMap, null)
+        fleet = baueFleetMitTyp(fleetMitLive, detailsMap, null, await fetchUrlaubsSperren())
           .filter(f => f.typ && f.status?.vehicleId && f.status?.freiAbOrt && f.status?.freiAbZeit);
         if (trocken) simulierteFlotte = fleet;
       }
@@ -3234,6 +3316,12 @@
         });
       }
 
+      fleet.filter(f => f.urlaub?.some(u => u.bis > new Date())).forEach(f => {
+        if (!urlaubGeloggt.has(f.name)) {
+          urlaubGeloggt.add(f.name);
+          f.urlaub.filter(u => u.bis > new Date()).forEach(u => log(`🌴 ${f.name}: Urlaub ${u.fahrer} ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')} (${u.status}) - es wird nur geplant, was samt Heimfahrt vorher endet.`));
+        }
+      });
       if (!zuweisungen.length) {
         log(runde === 1 ? 'Kein Fahrzeug hat einen passenden, einplanbaren Auftrag über der Mindestgrenze.' : 'Keine weiteren einplanbaren Aufträge - alle Fahrzeuge sind befüllt.');
         break;
