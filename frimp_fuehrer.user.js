@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.34
+// @version      0.29.35
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.34';
+  const SCRIPT_VERSION = '0.29.35';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3026,9 +3026,9 @@
                 const beideKomplett = kette.etappe1.kapazitaet === 'Komplettladung' && kette.etappe2.kapazitaet === 'Komplettladung';
                 if (beideKomplett && bewertung.einplanbar && kette.etappe1.jobId && kette.etappe2.jobId && eintrag.vehicleId && eintrag.freiAbZeit) {
                   html += `<button type="button" class="fi-dash-accept-btn fi-kette-btn"
-                    data-job-id-1="${kette.etappe1.jobId}" data-job-id-2="${kette.etappe2.jobId}"
+                    data-job-a="${kette.etappe1.jobId}" data-job-b="${kette.etappe2.jobId}"
                     data-vehicle-id="${eintrag.vehicleId}" data-frei-ab="${eintrag.freiAbZeit.toISOString()}"
-                    data-route-1="${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt}" data-route-2="${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt}"
+                    data-route-a="${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt}" data-route-b="${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt}"
                     data-fahrzeug="${eintrag.fahrzeugName}"
                   >✅ Beide Etappen annehmen &amp; hintereinander einplanen</button>`;
                 } else {
@@ -3302,7 +3302,7 @@
         const d = btn.dataset;
         const bestaetigt = window.confirm(
           `Kette für ${d.fahrzeug} annehmen und einplanen?\n\n` +
-          `1) ${d.route1}\n2) ${d.route2}\n\n` +
+          `1) ${d.routeA}\n2) ${d.routeB}\n\n` +
           `Beide Aufträge sind verbindlich - bei Nichtlieferung droht die Vertragsstrafe.`
         );
         if (!bestaetigt) return;
@@ -3310,7 +3310,7 @@
         const original = btn.textContent;
         btn.textContent = 'Wird eingeplant …';
         try {
-          const ergebnis = await nimmKetteAnUndPlaneEin(d.jobId1, d.jobId2, d.vehicleId, new Date(d.freiAb));
+          const ergebnis = await nimmKetteAnUndPlaneEin(d.jobA, d.jobB, d.vehicleId, new Date(d.freiAb));
           btn.textContent = ergebnis.etappe2Geplant
             ? '✅ Beide Etappen angenommen & eingeplant'
             : `✅ Etappe 1 eingeplant, Etappe 2 angenommen (planbar ab ${ergebnis.frei2.toLocaleString('de-DE')})`;
