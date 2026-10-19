@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.31
+// @version      0.29.32
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.31';
+  const SCRIPT_VERSION = '0.29.32';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -755,7 +755,7 @@
     const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
     const ladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
     const entladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
-    const geschwindigkeit = ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
+    const geschwindigkeit = spezifikation.geschwindigkeitKmh ?? ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
 
     // Anfahrt ZUERST separat simulieren: der Beladungsstart ist freiAbZeit +
     // Anfahrtdauer (inkl. evtl. Pausen WÄHREND der Anfahrt selbst) - NICHT
@@ -963,7 +963,7 @@
     const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
     const ladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
     const entladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
-    const geschwindigkeit = ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
+    const geschwindigkeit = spezifikation.geschwindigkeitKmh ?? ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
 
     // Etappe 1: Anfahrt zuerst SEPARAT simulieren, um den echten Beladungsstart
     // zu ermitteln (dieselbe Korrektur wie bei Einzel-Frachten, siehe Chat).
@@ -1162,7 +1162,7 @@
     const spezifikation = holeFahrzeugSpezifikation(aufbauTypLabel);
     const ladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
     const entladeZeitStunden = berechneLadeZeitStunden(spezifikation, fahreranzahl, fahrzeugStellplaetze);
-    const geschwindigkeit = ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
+    const geschwindigkeit = spezifikation.geschwindigkeitKmh ?? ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
 
     const anfahrtSegment = [{ dauer: anfahrtKm / geschwindigkeit, istFahrt: true }];
     let lauf = simuliereTourZeitplan(anfahrtSegment, fahreranzahl, restLenkzeitStunden, restSchichtzeitStunden);
@@ -1529,6 +1529,7 @@
    */
   const FAHRZEUG_SPEZIFIKATIONEN = {
     'Kleintransporter': {
+      geschwindigkeitKmh: 90, // aus Spiel-Phasenplänen kalibriert, siehe ZEIT_ANNAHMEN
       tankinhaltLiter: 80,
       verbrauchLeerLPro100km: 9.0,
       verbrauchBeladenLPro100km: 12.0,
@@ -1806,7 +1807,13 @@
   }
 
   const ZEIT_ANNAHMEN = {
-    avgGeschwindigkeitKmh: 75, // TODO: aus echten Touren kalibrieren
+    // Kalibriert 2026-10-19 an den vom Spiel selbst erzeugten Phasenplänen
+    // (reine Fahrzeit je Strecke, Pausen herausgerechnet, Strecke = unsere
+    // geschaetzteStrassenKm): Standard-Sattelzugmaschine mit Plane/Getreide
+    // 79,0 / 79,0 / 79,0 / 78,9 km/h, Kleintransporter 89,9 / 90,0 km/h.
+    // Dieser Wert gilt für alle "echten LKW"; Kleintransporter siehe
+    // geschwindigkeitKmh in FAHRZEUG_SPEZIFIKATIONEN.
+    avgGeschwindigkeitKmh: 79,
   };
 
   /**
