@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.33
+// @version      0.29.34
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.33';
+  const SCRIPT_VERSION = '0.29.34';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3023,9 +3023,19 @@
                   html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${f.jobId}" data-route="${f.startOrt} → ${f.zielOrt}">✅ ${f.frachtName} annehmen</button>`;
                 });
               } else if (istKette) {
-                html += `<div class="fi-dash-row fi-muted" style="font-size:11px;">ℹ Beide Etappen einzeln annehmen, dann nacheinander einplanen (automatisches Verketten unterstütze ich noch nicht):</div>`;
-                html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${kette.etappe1.jobId}" data-route="${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt}">✅ Etappe 1 annehmen</button>`;
-                html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${kette.etappe2.jobId}" data-route="${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt}">✅ Etappe 2 annehmen</button>`;
+                const beideKomplett = kette.etappe1.kapazitaet === 'Komplettladung' && kette.etappe2.kapazitaet === 'Komplettladung';
+                if (beideKomplett && bewertung.einplanbar && kette.etappe1.jobId && kette.etappe2.jobId && eintrag.vehicleId && eintrag.freiAbZeit) {
+                  html += `<button type="button" class="fi-dash-accept-btn fi-kette-btn"
+                    data-job-id-1="${kette.etappe1.jobId}" data-job-id-2="${kette.etappe2.jobId}"
+                    data-vehicle-id="${eintrag.vehicleId}" data-frei-ab="${eintrag.freiAbZeit.toISOString()}"
+                    data-route-1="${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt}" data-route-2="${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt}"
+                    data-fahrzeug="${eintrag.fahrzeugName}"
+                  >✅ Beide Etappen annehmen &amp; hintereinander einplanen</button>`;
+                } else {
+                  html += `<div class="fi-dash-row fi-muted" style="font-size:11px;">ℹ ${beideKomplett ? 'Etappe 1 liegt außerhalb des Planungsfensters' : 'Enthält Teilladungen (brauchen den Tourenplaner)'} - Etappen einzeln annehmen und später einplanen:</div>`;
+                  html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${kette.etappe1.jobId}" data-route="${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt}">✅ Etappe 1 annehmen</button>`;
+                  html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${kette.etappe2.jobId}" data-route="${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt}">✅ Etappe 2 annehmen</button>`;
+                }
               } else if (istMehrstufigeKette) {
                 html += `<div class="fi-dash-row fi-muted" style="font-size:11px;">ℹ Alle Aufträge einzeln annehmen, dann im Tourenplaner unter "${etappen[0].startOrt} → ${etappen[etappen.length - 1].zielOrt}"-Kategorie zusammen auswählen - Belade-/Entladereihenfolge in der Reihenfolge der Etappen oben setzen:</div>`;
                 etappen.forEach(etappe => {
@@ -3285,6 +3295,36 @@
       });
     });
 
+    container.querySelectorAll('.fi-kette-btn').forEach(btn => {
+      if (btn.dataset.fiWired) return;
+      btn.dataset.fiWired = '1';
+      btn.addEventListener('click', async () => {
+        const d = btn.dataset;
+        const bestaetigt = window.confirm(
+          `Kette für ${d.fahrzeug} annehmen und einplanen?\n\n` +
+          `1) ${d.route1}\n2) ${d.route2}\n\n` +
+          `Beide Aufträge sind verbindlich - bei Nichtlieferung droht die Vertragsstrafe.`
+        );
+        if (!bestaetigt) return;
+        btn.disabled = true;
+        const original = btn.textContent;
+        btn.textContent = 'Wird eingeplant …';
+        try {
+          const ergebnis = await nimmKetteAnUndPlaneEin(d.jobId1, d.jobId2, d.vehicleId, new Date(d.freiAb));
+          btn.textContent = ergebnis.etappe2Geplant
+            ? '✅ Beide Etappen angenommen & eingeplant'
+            : `✅ Etappe 1 eingeplant, Etappe 2 angenommen (planbar ab ${ergebnis.frei2.toLocaleString('de-DE')})`;
+          btn.style.background = '#2f6f3f';
+          btn.style.color = '#fff';
+        } catch (e) {
+          console.error('[FI-Helper] Kette annehmen/einplanen fehlgeschlagen', e);
+          btn.textContent = original;
+          btn.disabled = false;
+          window.alert(`Fehler: ${e.message}`);
+        }
+      });
+    });
+
     container.querySelectorAll('.fi-accept-only-btn').forEach(btn => {
       if (btn.dataset.fiWired) return;
       btn.dataset.fiWired = '1';
@@ -3351,6 +3391,35 @@
    * @param {string} vehicleId
    * @param {Date} freiAbZeit Geplanter Startzeitpunkt (frühestmöglich = Fahrzeug frei ab)
    */
+  /**
+   * Nimmt zwei Komplettladungen an und plant sie HINTEREINANDER auf dasselbe
+   * Fahrzeug: Etappe 1 wie gewohnt; danach wird das vom Spiel berechnete neue
+   * "frei ab" gelesen (das Spiel hängt manuelle Aktionen an die letzte Phase an)
+   * und Etappe 2 genau dort angesetzt. Etappe 2 wird erst NACH erfolgreicher
+   * Planung von Etappe 1 angenommen. Liegt der Start von Etappe 2 außerhalb des
+   * Planungsfensters, wird sie nur angenommen und später eingeplant.
+   */
+  async function nimmKetteAnUndPlaneEin(jobId1, jobId2, vehicleId, freiAbZeit) {
+    await nimmFrachtAnUndPlaneEin(jobId1, vehicleId, freiAbZeit);
+
+    const status = await fetchVehicleStatus(vehicleId);
+    const frei2 = status?.freiAbZeit ?? null;
+    if (!frei2 || frei2.getTime() <= freiAbZeit.getTime()) {
+      throw new Error('Etappe 1 ist eingeplant, aber das neue "frei ab" des Fahrzeugs konnte nicht eindeutig gelesen werden - Etappe 2 bitte einzeln annehmen und einplanen.');
+    }
+
+    const fensterEnde = Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000;
+    if (frei2.getTime() > fensterEnde) {
+      await nimmFrachtNurAn(jobId2);
+      return { etappe2Geplant: false, frei2 };
+    }
+
+    await nimmFrachtAnUndPlaneEin(jobId2, vehicleId, frei2).catch(e => {
+      throw new Error(`Etappe 1 ist eingeplant, Etappe 2 nicht: ${e.message}`);
+    });
+    return { etappe2Geplant: true, frei2 };
+  }
+
   async function holePoolOrderIds(vehicleId) {
     const res = await fetch(`/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}`, { credentials: 'same-origin', cache: 'no-store' });
     const doc = safeParseHtml(await res.text());
