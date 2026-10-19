@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.37
+// @version      0.29.38
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.37';
+  const SCRIPT_VERSION = '0.29.38';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2475,6 +2475,73 @@
    * bleibt es beim eigenen Fahrzeugtyp. fallbackLabel greift, wenn nichts erkannt wurde.
    */
   /**
+   * Frachtverträge (freight-contracts.php): Dauerverträge mit fester Strecke
+   * ("Rahmenvertrag" normal, "Intensivvertrag" meist Bronze/Premium). Pro Vertrag
+   * stehen auf der Karte: Strecke, €/km bzw. €/Stellplatz-km, Vergütung PRO
+   * ABRUF, Abrufe pro Tag, Ziel (zu erfüllende Abrufe), Laufzeit, Bonus bei
+   * Zielerreichung, Vertragsstrafe, benötigtes Setup und die Abrufregel
+   * ("24 Stunden gültig · 3. Fehlabruf = Vertrag scheitert"). Neue Angebote
+   * erscheinen täglich um 18:00 (ein normales + ggf. ein Premium-Angebot).
+   * NICHT bekannt (kein aktiver Vertrag beobachtet): wie ein Abruf im Spiel
+   * erscheint und ob "24 Stunden gültig" Annahme- oder Lieferfrist meint.
+   */
+  async function fetchFrachtvertraege() {
+    const num = str => (str ? parseFloat(str.replace(/\./g, '').replace(',', '.')) : null);
+    try {
+      const res = await fetch('/game/freight-contracts.php', { credentials: 'same-origin', cache: 'no-store' });
+      const doc = safeParseHtml(await res.text());
+      return Array.from(doc.querySelectorAll('article.contract-card, article')).map(a => {
+        const t = a.innerText.replace(/\s+/g, ' ').trim();
+        const g = re => { const m = re.exec(t); return m ? m[1] : null; };
+        const status = /Abgelaufen/.test(t) ? 'abgelaufen' : /Neues Angebot/.test(t) ? 'angebot' : 'sonstige';
+        const route = /\d{2}:\d{2} (.+?) → (.+?) STRECKE/.exec(t);
+        return {
+          status,
+          name: g(/((?:Rahmenvertrag|Intensivvertrag)[^·]*?)(?: · Rev|\s+Dauerkunde)/) ?? g(/((?:Rahmenvertrag|Intensivvertrag)[^·]*)/),
+          tier: /^(Bronze|Silber|Gold)/.exec(t)?.[1] ?? null,
+          gueltigBis: g(/bis (\d{2}\.\d{2}\.\d{4} \d{2}:\d{2})/),
+          von: route?.[1] ?? null, nach: route?.[2] ?? null,
+          streckeKm: num(g(/STRECKE ([\d.]+) km/)),
+          preisProKm: num(g(/(?:KM-PREIS|STELLPLATZ-KM) ([\d,]+) €\/km/)),
+          stellplaetze: num(g(/LADUNG (\d+) Stellplätze/)),
+          setup: g(/BENÖTIGTES SETUP (.+?) LAUFZEIT/),
+          laufzeitTage: num(g(/LAUFZEIT (\d+) Tage/)),
+          abrufeProTag: num(g(/ABRUFE (\d+) pro Tag/)),
+          zielAbrufe: num(g(/ZIEL (\d+) Abrufe/)),
+          verguetungProAbruf: num(g(/VERGÜTUNG ([\d.,]+) €/)),
+          bonus: num(g(/BONUS ([\d.,]+) €/)),
+          strafe: num(g(/VERTRAGSSTRAFE ([\d.,]+) €/)),
+        };
+      }).filter(v => v.status !== 'sonstige' || v.streckeKm);
+    } catch (e) {
+      console.warn('[FI-Helper] Frachtverträge konnten nicht geladen werden', e);
+      return [];
+    }
+  }
+
+  /** Kennzahlen eines Vertragsangebots + passende Flottenfahrzeuge (heuristisch über den Setup-Text). */
+  function bewerteVertrag(v, fleet) {
+    const umsatz = (v.verguetungProAbruf ?? 0) * (v.zielAbrufe ?? 0);
+    const kmh = ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
+    // Ein Fahrzeug fährt hin beladen, zurück leer; +25 % für Pausen, +3 h Laden/Entladen
+    const zyklusTage = ((v.streckeKm ?? 0) * 2 / kmh * 1.25 + 3) / 24;
+    const abrufeProFahrzeug = Math.max(1, Math.floor((v.laufzeitTage ?? 1) / zyklusTage));
+    const fahrzeugBedarf = Math.ceil((v.zielAbrufe ?? 0) / abrufeProFahrzeug);
+    const setupLower = (v.setup ?? '').toLowerCase();
+    const passende = fleet.filter(f => {
+      const typ = (f.typ ?? '').toLowerCase();
+      const kern = typ.replace(/\s*\/\s*/g, ' ').split(' ')[0];
+      return kern && setupLower.includes(kern);
+    });
+    return {
+      umsatz, bonusAnteilProzent: umsatz ? (v.bonus ?? 0) / umsatz * 100 : null,
+      eurProKm: v.streckeKm ? v.verguetungProAbruf / v.streckeKm : null,
+      risikoFaktor: v.verguetungProAbruf ? (v.strafe ?? 0) / v.verguetungProAbruf : null,
+      zyklusTage, fahrzeugBedarf, passende,
+    };
+  }
+
+  /**
    * Urlaub der Fahrer (staff.php): pro Fahrer-Karte steht z.B.
    * "Urlaubsantrag offen · 27.10.–29.10.2026" (genehmigte Urlaube vermutlich
    * "Urlaub genehmigt · ..." - Text noch nicht beobachtet, deshalb allgemein
@@ -2680,6 +2747,9 @@
 
       <div id="fi-dash-fleet" class="fi-dash-grid"><div class="fi-empty">Lade Flotte …</div></div>
 
+      <h3>Frachtverträge – aktuelle Angebote</h3>
+      <div id="fi-dash-contracts" class="fi-dash-grid"><div class="fi-empty">Lade Frachtverträge …</div></div>
+
       <h3>Frachtbörse – beste Routen berechnen</h3>
       <div class="fi-dash-controls">
         <div class="fi-dash-field">
@@ -2815,6 +2885,28 @@
           ${kommendeUrlaube.map(u => `<div class="fi-dash-row">${u.fahrer} · ${u.fzName}: ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')} <span class="fi-muted">(${u.status})</span></div>`).join('')}
           <div class="fi-dash-row fi-muted">→ Automatische Touren enden samt Heimfahrt vor Urlaubsbeginn (Fahrzeug muss am Firmensitz sein).</div>
         </div>`;
+      }
+
+      // Frachtverträge: nur ANZEIGE und Bewertung, keine Annahme - wie Abrufe im
+      // Spiel ablaufen ist noch nicht beobachtet, eine Annahme wäre verbindlich.
+      const vertraegeEl = document.getElementById('fi-dash-contracts');
+      if (vertraegeEl) {
+        const vertraege = (await fetchFrachtvertraege()).filter(v => v.status === 'angebot');
+        const fleetTypisiert = baueFleetMitTyp(fleet, fuhrparkDetails, null);
+        vertraegeEl.innerHTML = vertraege.length ? vertraege.map(v => {
+          const b = bewerteVertrag(v, fleetTypisiert);
+          const passt = b.passende.length ? `✅ passende Fahrzeuge: ${b.passende.map(f => f.name.split(' · ')[0]).join(', ')}` : '❌ kein passendes Fahrzeug in der Flotte';
+          return `<div class="fi-dash-card">
+            <div class="fi-dash-card-title">📜 ${v.tier ? v.tier + ' · ' : ''}${v.name ?? 'Vertrag'}</div>
+            <div class="fi-dash-row"><strong>${v.von} → ${v.nach}</strong> (${v.streckeKm} km)</div>
+            <div class="fi-dash-row fi-muted">${v.setup ?? '?'} · Angebot gültig bis ${v.gueltigBis ?? '?'}</div>
+            <div class="fi-dash-row">${fmtEuro(v.verguetungProAbruf ?? 0)} je Abruf (${b.eurProKm != null ? b.eurProKm.toFixed(2) : '?'} €/km) · ${v.abrufeProTag}/Tag · Ziel ${v.zielAbrufe} Abrufe in ${v.laufzeitTage} Tagen</div>
+            <div class="fi-dash-row"><strong>${fmtEuro(b.umsatz)}</strong> Umsatz bei Zielerreichung + ${fmtEuro(v.bonus ?? 0)} Bonus (${b.bonusAnteilProzent != null ? b.bonusAnteilProzent.toFixed(1) : '?'} %)</div>
+            <div class="fi-dash-row fi-warn">⚠ Vertragsstrafe ${fmtEuro(v.strafe ?? 0)} (${b.risikoFaktor != null ? b.risikoFaktor.toFixed(1) : '?'}× ein Abruf) · 3. Fehlabruf = Vertrag scheitert</div>
+            <div class="fi-dash-row fi-muted">Etwa ${b.fahrzeugBedarf} Fahrzeug(e) nötig (Zyklus ~${b.zyklusTage.toFixed(1)} Tage je Abruf inkl. Rückfahrt)</div>
+            <div class="fi-dash-row ${b.passende.length ? 'fi-good' : 'fi-bad'}">${passt}</div>
+          </div>`;
+        }).join('') : '<div class="fi-empty">Keine neuen Vertragsangebote.</div>';
       }
 
       // Die einzelnen Fahrzeugkarten sind auf Wunsch entfallen (die Timeline zeigt
