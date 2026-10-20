@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.46
+// @version      0.29.47
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.46';
+  const SCRIPT_VERSION = '0.29.47';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -1333,11 +1333,21 @@
     const ANFAHRT_FREIGRENZE_KM = 150; // bis hierhin normale Positionierungsfahrt, keine Strafe
     const STRAFE_PRO_ANFAHRT_KM = 0.01; // €/km Abzug je km Anfahrt über der Freigrenze
 
+    // SCORE = NETTOGEWINN PRO FAHRZEUGSTUNDE (nicht pro km): Das knappe Gut eines
+    // Fahrzeugs ist Zeit - inklusive Anfahrt, Lade-/Entladezeit und Schicht-
+    // pausen (bei nur einem Fahrer 11 h je Schicht!). Ein Auftrag mit höherem
+    // €/km, der wegen Pausen/Anfahrt viel länger dauert, ist schlechter als ein
+    // etwas schwächerer mit weniger Stillstand (Beispiel PL 01 mit 1 Fahrer:
+    // 3,85 €/km = 101 €/h gegen 3,64 €/km = 139 €/h). Die Umweg-/Anfahrt-
+    // Strafen sind €/km-Werte und werden mit ~79 km/h in €/h umgerechnet.
+    const STRAFE_KMH_UMRECHNUNG = 79;
     function kombinierterScore(bewertung) {
+      const h = bewertung.gesamtStunden;
+      if (!(h > 0) || bewertung.deckungsbeitragEuro == null) return -Infinity;
       const umweg = bewertung.umwegProzent ?? 0;
       const umwegStrafe = Math.max(0, umweg - UMWEG_FREIGRENZE_PROZENT) * STRAFE_PRO_UMWEG_PUNKT;
       const anfahrtStrafe = Math.max(0, (bewertung.anfahrtKm ?? 0) - ANFAHRT_FREIGRENZE_KM) * STRAFE_PRO_ANFAHRT_KM;
-      return (bewertung.effektivProKm ?? -Infinity) - umwegStrafe - anfahrtStrafe;
+      return bewertung.deckungsbeitragEuro / h - (umwegStrafe + anfahrtStrafe) * STRAFE_KMH_UMRECHNUNG;
     }
 
     // Bei Rückfracht-Suche dürfen Einzel-Routen und Bündel NUR Angebote mit
@@ -1467,7 +1477,7 @@
       kandidaten = kandidaten.slice(0, LOOKAHEAD_TOP);
       kandidaten.forEach(k => {
         const basis = k.bewertung;
-        if (basis.effektivProKm == null || !k.fracht?.zielOrt || !basis.ankunftZeit) return;
+        if (basis.effektivProKm == null || !(basis.gesamtStunden > 0) || !k.fracht?.zielOrt || !basis.ankunftZeit) return;
         const belegt = new Set(holeJobIdsVonKandidat(k));
         const folgeStatus = {
           ...fahrzeug.status, freiAbOrt: k.fracht.zielOrt, freiAbZeit: basis.ankunftZeit,
@@ -1492,14 +1502,14 @@
           const bF = bewerteFrachtFuerFahrzeug(f, folgeStatus, frischeLive, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (!bF || bF.schaffbar === false || bF.deckungsbeitragEuro == null) return;
           if (urlaubskonflikt(fahrzeug, f.zielOrt, bF.ankunftZeit)) return;
-          const paarKm = gesamtKmErster + bF.anfahrtKm + (f.entfernungKm ?? 0);
-          if (paarKm <= 0) return;
-          const paarEff = (basis.deckungsbeitragEuro + bF.deckungsbeitragEuro) / paarKm;
+          const paarStunden = basis.gesamtStunden + bF.gesamtStunden;
+          if (!(paarStunden > 0)) return;
+          const paarEff = (basis.deckungsbeitragEuro + bF.deckungsbeitragEuro) / paarStunden; // €/h über beide Aufträge
           if (!besteFolge || paarEff > besteFolge.paarEff) besteFolge = { fracht: f, bewertung: bF, paarEff };
         });
 
         if (besteFolge) {
-          const strafen = basis.effektivProKm - basis.kombiScore; // Umweg-/Anfahrt-Strafen des ersten Auftrags bleiben erhalten
+          const strafen = basis.deckungsbeitragEuro / basis.gesamtStunden - basis.kombiScore; // Umweg-/Anfahrt-Strafen des ersten Auftrags bleiben erhalten (in €/h)
           basis.kombiScore = besteFolge.paarEff - strafen;
           basis.folge = besteFolge;
         }
@@ -3302,12 +3312,12 @@
               html += `<div class="fi-dash-row fi-muted">🕐 Ankunft: ${bewertung.ankunftZeit.toLocaleString('de-DE')}</div>`;
               if (bewertung.folge) {
                 const fo = bewertung.folge;
-                html += `<div class="fi-dash-row fi-muted">➡ Danach (Vorausschau): ${fo.fracht.startOrt} → ${fo.fracht.zielOrt} · Anfahrt ~${Math.round(fo.bewertung.anfahrtKm)} km · zusammen ${fo.paarEff.toFixed(2)} €/km</div>`;
+                html += `<div class="fi-dash-row fi-muted">➡ Danach (Vorausschau): ${fo.fracht.startOrt} → ${fo.fracht.zielOrt} · Anfahrt ~${Math.round(fo.bewertung.anfahrtKm)} km · zusammen ${Math.round(fo.paarEff)} €/h</div>`;
               }
               html += `<div class="fi-dash-row ${schaffbarKlasse}">${schaffbarIcon} ${schaffbarText}</div>`;
               if (bewertung.lenkzeitHinweis) html += `<div class="fi-dash-row fi-warn">⏱ ${bewertung.lenkzeitHinweis}</div>`;
               if (!bewertung.einplanbar) html += `<div class="fi-dash-row fi-warn">⏳ ${bewertung.einplanbarHinweis}</div>`;
-              html += `<div class="fi-dash-row"><strong>${bewertung.effektivProKm !== null ? bewertung.effektivProKm.toFixed(2) + ' €/km effektiv' : '—'}</strong></div>`;
+              html += `<div class="fi-dash-row"><strong>${bewertung.effektivProKm !== null ? bewertung.effektivProKm.toFixed(2) + ' €/km effektiv' : '—'}</strong>${bewertung.gesamtStunden > 0 ? ` · <strong>${Math.round(bewertung.deckungsbeitragEuro / bewertung.gesamtStunden)} €/h</strong> <span class="fi-muted">(${Math.round(bewertung.gesamtStunden)} h)</span>` : ''}</div>`;
 
               if (istBundle) {
                 bundleFrachten.forEach(f => {
@@ -3544,7 +3554,7 @@
         const fahrzeugName = z.eintrag.fahrzeugName;
         const freiAbVorher = z.eintrag.freiAbZeit;
         try {
-          const beschreibung = `${fahrzeugName}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2)} €/km effektiv · Beladung ab ${bewertung.beladungsStartZeit.toLocaleString('de-DE')} · Ankunft ${bewertung.ankunftZeit.toLocaleString('de-DE')}${bewertung.folge ? ` · danach ${bewertung.folge.fracht.startOrt} → ${bewertung.folge.fracht.zielOrt} (zusammen ${bewertung.folge.paarEff.toFixed(2)} €/km)` : ''}`;
+          const beschreibung = `${fahrzeugName}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2)} €/km · ${Math.round(bewertung.deckungsbeitragEuro / bewertung.gesamtStunden)} €/h (${Math.round(bewertung.gesamtStunden)} h) · Beladung ab ${bewertung.beladungsStartZeit.toLocaleString('de-DE')} · Ankunft ${bewertung.ankunftZeit.toLocaleString('de-DE')}${bewertung.folge ? ` · danach ${bewertung.folge.fracht.startOrt} → ${bewertung.folge.fracht.zielOrt} (zusammen ${Math.round(bewertung.folge.paarEff)} €/h)` : ''}`;
           if (trocken) {
             const f = fleet.find(x => String(x.status.vehicleId) === String(z.eintrag.vehicleId));
             f.status = { ...f.status, freiAbZeit: bewertung.ankunftZeit, freiAbOrt: fracht.zielOrt };
