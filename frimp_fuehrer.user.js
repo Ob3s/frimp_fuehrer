@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.50
+// @version      0.29.51
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.50';
+  const SCRIPT_VERSION = '0.29.51';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -1457,7 +1457,25 @@
       // Urlaub: nichts planen, das mit einem (beantragten) Urlaub eines Fahrers
       // des Fahrzeugs kollidiert (Tour + Heimfahrt muss vor Urlaubsbeginn enden).
       let urlaubHinweis = null;
+      // NUR BUCHBARE Kandidaten: einplanbar (Planungsfenster samt Sicherheitsabstand),
+      // Frist einhaltbar (unbekannte Frist zählt als einhaltbar), per Skript buchbar
+      // (Einzel-Komplettladung oder Kette aus zwei Komplettladungen, deren Etappe 2
+      // ebenfalls noch im Fenster startet - keine Teilladungen/Bündel). Alles andere
+      // wird gar nicht erst berücksichtigt.
+      const fensterEndeMs = Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000;
+      const istBuchbar = k => {
+        const b = k.bewertung;
+        if (!b || !b.einplanbar || b.schaffbar === false) return false;
+        if (k.istBundle || k.istMehrstufigeKette) return false;
+        if (k.istKette) {
+          const beideKomplett = k.kette.etappe1.kapazitaet === 'Komplettladung' && k.kette.etappe2.kapazitaet === 'Komplettladung';
+          const etappe2Passt = b.zwischenankunft && (b.zwischenankunft.getTime() + 2 * 3600 * 1000) <= fensterEndeMs;
+          return beideKomplett && !!etappe2Passt && !!k.kette.etappe1.jobId && !!k.kette.etappe2.jobId;
+        }
+        return !!k.fracht?.jobId;
+      };
       const bewertungen = [...einzelBewertungen, ...bundleBewertungen, ...kettenBewertungen, ...mehrstufigeKettenBewertungen]
+        .filter(istBuchbar)
         .filter(k => {
           const grund = urlaubskonflikt(fahrzeug, k.fracht?.zielOrt, k.bewertung?.ankunftZeit);
           if (grund && !urlaubHinweis) urlaubHinweis = grund;
@@ -1467,7 +1485,7 @@
       // Fristen-Einhaltung bleibt eine WEICHE Präferenz - lieber eine knapp
       // verpasste Frist zeigen als gar nichts, das ist informativ statt gefährlich.
       const schaffbare = bewertungen.filter(x => x.bewertung.schaffbar !== false); // true ODER unbekannt (null)
-      let kandidaten = schaffbare.length > 0 ? schaffbare : bewertungen;
+      let kandidaten = schaffbare; // schaffbare == bewertungen (Fristen sind oben schon ausgeschlossen)
 
       kandidaten.forEach(k => { k.bewertung.kombiScore = kombinierterScore(k.bewertung); });
       kandidaten.sort((a, b) => b.bewertung.kombiScore - a.bewertung.kombiScore);
@@ -3034,7 +3052,7 @@
           const tip = [
             `${v.name ?? 'Vertrag'}${v.tier ? ' (' + v.tier + ')' : ''}`,
             `${v.von} → ${v.nach}, ${v.streckeKm} km, Setup: ${v.setup ?? '?'}`,
-            `${fmtEuro(v.verguetungProAbruf ?? 0)} je Abruf (${b.eurProKm != null ? b.eurProKm.toFixed(2) : '?'} €/km), ${v.abrufeProTag}/Tag, Ziel ${v.zielAbrufe} in ${v.laufzeitTage} Tagen`,
+            `${fmtEuro(v.verguetungProAbruf ?? 0)} je Abruf, ${v.abrufeProTag}/Tag, Ziel ${v.zielAbrufe} in ${v.laufzeitTage} Tagen`,
             `Umsatz ${fmtEuro(b.umsatz)} + Bonus ${fmtEuro(v.bonus ?? 0)} (${b.bonusAnteilProzent != null ? b.bonusAnteilProzent.toFixed(1) : '?'} %)`,
             `Vertragsstrafe ${fmtEuro(v.strafe ?? 0)} (${b.risikoFaktor != null ? b.risikoFaktor.toFixed(1) : '?'}x ein Abruf), 3. Fehlabruf = Vertrag scheitert`,
             `Fahrzeugbedarf ca. ${b.fahrzeugBedarf} (Zyklus ~${b.zyklusTage.toFixed(1)} Tage je Abruf)`,
@@ -3237,12 +3255,8 @@
           ? kompatibleFleetVollstaendig.filter(f => String(f.status?.vehicleId) === String(rueckfrachtFilter.nurVehicleId))
           : kompatibleFleetVollstaendig;
 
+        // Nur WARNUNGEN anzeigen (kein Cache-/Anzahl-/Seiten-Gerede)
         let infoHtml = '';
-        if (ausCache) {
-          const minutenAlt = Math.round((Date.now() - cacheEintrag.zeitstempel) / 60000);
-          infoHtml += `<div class="fi-dash-row fi-muted">💾 Aus Cache (vor ${minutenAlt} Min. geladen)</div>`;
-        }
-        infoHtml += `<div class="fi-dash-row">${passende.length} passende Angebote · ${gescannteSeiten}${gesamtSeiten && gesamtSeiten > gescannteSeiten ? `/${gesamtSeiten}` : ''} Seiten à 100 gescannt</div>`;
         if (onlyReturnCb.checked && !firmenStandort) {
           infoHtml += `<div class="fi-dash-row fi-warn">⚠ Firmenstandort konnte nicht ermittelt werden - "Zurück zur Firma" wird ignoriert.</div>`;
         }
@@ -3251,12 +3265,10 @@
         }
         if (rueckfrachtFilter.zielStadt) {
           const zielTreffer = filtereNachZielstadt(passende, rueckfrachtFilter.zielStadt, rueckfrachtFilter.zielRadiusKm ?? 0).length;
-          infoHtml += `<div class="fi-dash-row ${zielTreffer === 0 ? 'fi-warn' : 'fi-muted'}">🎯 davon ${zielTreffer} mit Ziel "${rueckfrachtFilter.zielStadt}"${rueckfrachtFilter.zielRadiusKm > 0 ? ` (±${rueckfrachtFilter.zielRadiusKm}km Umkreis)` : ' (exakt)'}</div>`;
+          if (zielTreffer === 0) infoHtml += `<div class="fi-dash-row fi-warn">🎯 Keine Angebote mit Ziel "${rueckfrachtFilter.zielStadt}"${rueckfrachtFilter.zielRadiusKm > 0 ? ` (±${rueckfrachtFilter.zielRadiusKm} km)` : ''}.</div>`;
         }
         // Maßgeblich ist die Spezifikation der tatsächlich fahrenden Fahrzeuge
-        // (Zugmaschine bei Sattelzug-Kombis), nicht der Name der Frachtkategorie:
-        // Getreidekipper fahren mit der Standard-Sattelzugmaschine, deren
-        // Verbrauch (25/32 L/100 km) aus den Abschlussmeldungen bestätigt ist.
+        // (Zugmaschine bei Sattelzug-Kombis), nicht der Name der Frachtkategorie.
         const ohneSpezifikation = [...new Set(kompatibleFleet.map(f => f.verbrauchsTyp ?? f.typ))].filter(t => !FAHRZEUG_SPEZIFIKATIONEN[t]);
         if (ohneSpezifikation.length) {
           infoHtml += `<div class="fi-dash-row fi-warn">⚠ Für "${ohneSpezifikation.join('", "')}" noch keine echten Verbrauchsdaten - Kostenschätzung nutzt Platzhalter.</div>`;
@@ -3265,7 +3277,7 @@
           console.log(`[FI-Helper] ${inkompatibleFleet.length} Fahrzeug(e) übersprungen (anderer Typ): ${inkompatibleFleet.map(f => f.name).join(', ')}`);
         }
 
-        let html = `<div class="fi-dash-card" style="grid-column: 1 / -1;">${infoHtml}</div>`;
+        let html = infoHtml ? `<div class="fi-dash-card" style="grid-column: 1 / -1;">${infoHtml}</div>` : '';
 
         if (!passende.length) {
           html += '<div class="fi-empty">Keine passenden Angebote gefunden.</div>';
@@ -3273,104 +3285,37 @@
           html += '<div class="fi-empty">Kein Fahrzeug mit passendem Typ für diese Kategorie gefunden.</div>';
         } else {
           const besteProFahrzeugRoh = findeBesteRoutenProFahrzeug(passende, kompatibleFleet, rueckfrachtFilter.zielStadt || null, rueckfrachtFilter.zielRadiusKm ?? 0);
-          const besteProFahrzeug = loeseFahrzeugKonflikte(besteProFahrzeugRoh);
+          // Fahrzeuge ohne buchbaren Auftrag (nicht einplanbar, Frist nicht zu halten, Urlaub, ...) werden ausgeblendet
+          const besteProFahrzeug = loeseFahrzeugKonflikte(besteProFahrzeugRoh).filter(e => e.beste);
+          if (!besteProFahrzeug.length) html += '<div class="fi-empty">Kein Fahrzeug einplanbar.</div>';
           besteProFahrzeug.forEach(eintrag => {
             const titel = eintrag.vehicleId
               ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(eintrag.vehicleId)}">🚐 ${eintrag.fahrzeugName}</a>`
               : `🚐 ${eintrag.fahrzeugName}`;
             html += `<div class="fi-dash-card"><div class="fi-dash-card-title">${titel}</div>`;
-            if (!eintrag.beste) {
-              html += `<div class="fi-dash-row fi-warn">${eintrag.urlaubHinweis ? '🌴 Keine Tour wegen Urlaub: ' + eintrag.urlaubHinweis : 'Keine bewertbare Fracht (Stadt evtl. nicht in Koordinatentabelle).'}</div>`;
+            const { fracht, bewertung, istKette, kette } = eintrag.beste;
+            const proStunde = bewertung.gesamtStunden > 0 ? Math.round(bewertung.deckungsbeitragEuro / bewertung.gesamtStunden) : null;
+            html += `<div class="fi-dash-row"><strong>${fracht.startOrt} → ${fracht.zielOrt}</strong> (${fracht.entfernungKm ?? '?'} km)</div>`;
+            if (istKette) {
+              html += `<div class="fi-dash-bundle-item">↳ ${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt} · ${kette.etappe1.entfernungKm} km · ${fmtEuro(kette.etappe1.verguetungEuro ?? 0)}</div>`;
+              html += `<div class="fi-dash-bundle-item">↳ ${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt} · ${kette.etappe2.entfernungKm} km · ${fmtEuro(kette.etappe2.verguetungEuro ?? 0)}</div>`;
+            }
+            html += `<div class="fi-dash-row fi-muted">${istKette ? '2 Etappen' : fracht.frachtName} · ${fmtEuro(fracht.verguetungEuro ?? 0)}${proStunde != null ? ` · ${proStunde} €/h` : ''}</div>`;
+            html += `<div class="fi-dash-row">Leerfahrt: ${Math.round(bewertung.anfahrtKm)} km</div>`;
+
+            if (istKette) {
+              html += `<button type="button" class="fi-dash-accept-btn fi-kette-btn"
+                data-job-a="${kette.etappe1.jobId}" data-job-b="${kette.etappe2.jobId}"
+                data-vehicle-id="${eintrag.vehicleId}" data-frei-ab="${eintrag.freiAbZeit.toISOString()}" data-beladung="${bewertung.beladungsStartZeit.toISOString()}"
+                data-route-a="${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt}" data-route-b="${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt}"
+                data-fahrzeug="${eintrag.fahrzeugName}"
+              >✅ Einplanen</button>`;
             } else {
-              const { fracht, bewertung, istBundle, bundleFrachten, istKette, kette, istMehrstufigeKette, etappen } = eintrag.beste;
-              const schaffbarIcon = bewertung.schaffbar === true ? '✅' : bewertung.schaffbar === false ? '❌' : '❔';
-              const schaffbarKlasse = bewertung.schaffbar === true ? 'fi-good' : bewertung.schaffbar === false ? 'fi-bad' : 'fi-warn';
-              const schaffbarText = bewertung.schaffbar === true ? 'Frist einhaltbar' : bewertung.schaffbar === false ? 'Frist NICHT einhaltbar' : 'Frist unbekannt';
-
-              if (eintrag.verdraengt) {
-                html += `<div class="fi-dash-row fi-muted">↪ Eigentliche Top-Fracht ging an ein besser positioniertes Fahrzeug - das hier ist die beste noch freie Option.</div>`;
-              }
-              if (istBundle) {
-                html += `<div class="fi-dash-row fi-loc">📦 <strong>Bündel: ${bundleFrachten.length} Teilladungen</strong> (${fracht.stellplaetzeBenoetigt} Stpl.)</div>`;
-              }
-              if (istKette) {
-                html += `<div class="fi-dash-row fi-loc">🔗 <strong>Kette über ${kette.zwischenstadt}</strong> (2 Etappen)</div>`;
-              }
-              if (istMehrstufigeKette) {
-                const gesamtAuftraege = etappen.reduce((s, e) => s + e.frachten.length, 0);
-                html += `<div class="fi-dash-row fi-loc">🔗📦 <strong>Mehrstufige Kette</strong> (${etappen.length} Etappen, ${gesamtAuftraege} Aufträge, ohne Leerkilometer zwischen den Etappen)</div>`;
-              }
-              html += `<div class="fi-dash-row"><strong>${fracht.startOrt} → ${fracht.zielOrt}</strong> (${fracht.entfernungKm ?? '?'} km)</div>`;
-              html += `<div class="fi-dash-row fi-muted">${istBundle ? `${bundleFrachten.length} Aufträge` : (istKette || istMehrstufigeKette) ? `${etappen ? etappen.length : 2} Etappen` : fracht.frachtName} · ${fmtEuro(fracht.verguetungEuro ?? 0)}${istBundle || istKette || istMehrstufigeKette ? ' gesamt' : ''}</div>`;
-              if (istBundle) {
-                bundleFrachten.forEach(f => {
-                  html += `<div class="fi-dash-bundle-item">↳ ${f.frachtName} · ${f.stellplaetzeBenoetigt} Stpl. · ${fmtEuro(f.verguetungEuro ?? 0)}</div>`;
-                });
-              }
-              if (istKette) {
-                html += `<div class="fi-dash-bundle-item">↳ Etappe 1: ${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt} · ${kette.etappe1.entfernungKm} km · ${fmtEuro(kette.etappe1.verguetungEuro ?? 0)}${bewertung.zwischenankunft ? ' · Ankunft dort: ' + bewertung.zwischenankunft.toLocaleString('de-DE') : ''}${bewertung.etappe1Schaffbar === false ? ' ❌ Frist verpasst' : ''}</div>`;
-                html += `<div class="fi-dash-bundle-item">↳ Etappe 2: ${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt} · ${kette.etappe2.entfernungKm} km · ${fmtEuro(kette.etappe2.verguetungEuro ?? 0)}${bewertung.etappe2Schaffbar === false ? ' ❌ Frist verpasst' : ''}</div>`;
-              }
-              if (istMehrstufigeKette) {
-                etappen.forEach((etappe, i) => {
-                  const ergebnis = bewertung.etappenErgebnisse?.[i];
-                  const bündelHinweis = etappe.frachten.length > 1 ? ` (Bündel aus ${etappe.frachten.length} Teilladungen)` : '';
-                  html += `<div class="fi-dash-bundle-item">↳ Etappe ${i + 1}: ${etappe.startOrt} → ${etappe.zielOrt} · ${etappe.entfernungKm} km · ${etappe.stellplaetzeGesamt} Stpl.${bündelHinweis} · ${fmtEuro(etappe.verguetungGesamt ?? 0)}${ergebnis ? ' · Ankunft dort: ' + ergebnis.ankunftZeit.toLocaleString('de-DE') : ''}${ergebnis?.schaffbar === false ? ' ❌ Frist verpasst' : ''}</div>`;
-                  etappe.frachten.forEach(f => {
-                    html += `<div class="fi-dash-bundle-item" style="padding-left:24px;">↳↳ ${f.frachtName} · ${f.stellplaetzeBenoetigt} Stpl. · ${fmtEuro(f.verguetungEuro ?? 0)}</div>`;
-                  });
-                });
-              }
-              html += `<div class="fi-dash-row ${bewertung.anfahrtAnteilProzent > 40 ? 'fi-warn' : 'fi-loc'}">🚫 Leerfahrt: ~${Math.round(bewertung.anfahrtKm)} km${bewertung.anfahrtAnteilProzent != null ? ` (${bewertung.anfahrtAnteilProzent}% der Gesamtstrecke)` : ''}${bewertung.kostenAnfahrt != null ? ` · ${fmtEuro(bewertung.kostenAnfahrt)} Kosten` : ''}</div>`;
-              if (bewertung.umwegProzent != null) {
-                html += `<div class="fi-dash-row ${bewertung.umwegProzent > 50 ? 'fi-warn' : 'fi-muted'}">🧭 Umweg: ${bewertung.umwegProzent > 0 ? '+' : ''}${bewertung.umwegProzent}%${bewertung.umwegProzent > 150 ? ' – sehr großer Umweg, nur mangels besserer Alternative gewählt!' : ''}</div>`;
-              }
-              if (bewertung.kapazitaetHinweis) html += `<div class="fi-dash-row fi-warn">📦 ${bewertung.kapazitaetHinweis}</div>`;
-              html += `<div class="fi-dash-row fi-muted">🕐 Ankunft: ${bewertung.ankunftZeit.toLocaleString('de-DE')}</div>`;
-              if (bewertung.folge) {
-                const fo = bewertung.folge;
-                html += `<div class="fi-dash-row fi-muted">➡ Danach (Vorausschau): ${fo.fracht.startOrt} → ${fo.fracht.zielOrt} · Anfahrt ~${Math.round(fo.bewertung.anfahrtKm)} km · zusammen ${Math.round(fo.paarEff)} €/h</div>`;
-              }
-              html += `<div class="fi-dash-row ${schaffbarKlasse}">${schaffbarIcon} ${schaffbarText}</div>`;
-              if (bewertung.lenkzeitHinweis) html += `<div class="fi-dash-row fi-warn">⏱ ${bewertung.lenkzeitHinweis}</div>`;
-              if (!bewertung.einplanbar) html += `<div class="fi-dash-row fi-warn">⏳ ${bewertung.einplanbarHinweis}</div>`;
-              html += `<div class="fi-dash-row"><strong>${bewertung.effektivProKm !== null ? bewertung.effektivProKm.toFixed(2) + ' €/km effektiv' : '—'}</strong>${bewertung.gesamtStunden > 0 ? ` · <strong>${Math.round(bewertung.deckungsbeitragEuro / bewertung.gesamtStunden)} €/h</strong> <span class="fi-muted">(${Math.round(bewertung.gesamtStunden)} h)</span>` : ''}</div>`;
-
-              if (istBundle) {
-                html += `<div class="fi-dash-row fi-warn" style="font-size:12px;">🚫 Nicht automatisch buchbar: Teilladungen brauchen den Tourenplaner.</div>`;
-              } else if (istKette) {
-                // Alles oder nichts: ein Knopf gibt es nur, wenn die GANZE Kette
-                // buchbar ist (beide Komplettladungen, Etappe 1 einplanbar UND
-                // der Start von Etappe 2 liegt - mit 2 h Sicherheitsabstand für
-                // die Schätzungenauigkeit - noch im Planungsfenster). Einzel-
-                // Annahme einer Kette-Etappe gibt es bewusst nicht mehr.
-                const beideKomplett = kette.etappe1.kapazitaet === 'Komplettladung' && kette.etappe2.kapazitaet === 'Komplettladung';
-                const fensterEndeMs = Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000;
-                const etappe2Passt = bewertung.zwischenankunft && (bewertung.zwischenankunft.getTime() + 2 * 3600 * 1000) <= fensterEndeMs;
-                if (beideKomplett && bewertung.einplanbar && etappe2Passt && kette.etappe1.jobId && kette.etappe2.jobId && eintrag.vehicleId && eintrag.freiAbZeit) {
-                  html += `<button type="button" class="fi-dash-accept-btn fi-kette-btn"
-                    data-job-a="${kette.etappe1.jobId}" data-job-b="${kette.etappe2.jobId}"
-                    data-vehicle-id="${eintrag.vehicleId}" data-frei-ab="${eintrag.freiAbZeit.toISOString()}" data-beladung="${bewertung.beladungsStartZeit.toISOString()}"
-                    data-route-a="${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt}" data-route-b="${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt}"
-                    data-fahrzeug="${eintrag.fahrzeugName}"
-                  >✅ Beide Etappen annehmen &amp; hintereinander einplanen</button>`;
-                } else {
-                  const grund = !beideKomplett ? 'enthält Teilladungen (brauchen den Tourenplaner)'
-                    : !bewertung.einplanbar ? 'Etappe 1 liegt außerhalb des Planungsfensters'
-                    : 'Etappe 2 würde außerhalb des Planungsfensters starten';
-                  html += `<div class="fi-dash-row fi-warn" style="font-size:12px;">🚫 Nicht automatisch buchbar: ${grund}. Es wird nichts halb gebucht.</div>`;
-                }
-              } else if (istMehrstufigeKette) {
-                html += `<div class="fi-dash-row fi-warn" style="font-size:12px;">🚫 Nicht automatisch buchbar: Teilladungs-Kette braucht den Tourenplaner.</div>`;
-              } else if (!bewertung.einplanbar) {
-                // kein Knopf: es gibt nur "Einplanen" (Annehmen und Einplanen in einem Schritt)
-              } else if (fracht.jobId && eintrag.vehicleId && eintrag.freiAbZeit) {
-                html += `<button type="button" class="fi-dash-accept-btn fi-accept-btn"
-                  data-job-id="${fracht.jobId}" data-vehicle-id="${eintrag.vehicleId}"
-                  data-frei-ab="${eintrag.freiAbZeit.toISOString()}" data-beladung="${bewertung.beladungsStartZeit.toISOString()}"
-                  data-route="${fracht.startOrt} → ${fracht.zielOrt}" data-fahrzeug="${eintrag.fahrzeugName}"
-                >✅ Einplanen</button>`;
-              }
+              html += `<button type="button" class="fi-dash-accept-btn fi-accept-btn"
+                data-job-id="${fracht.jobId}" data-vehicle-id="${eintrag.vehicleId}"
+                data-frei-ab="${eintrag.freiAbZeit.toISOString()}" data-beladung="${bewertung.beladungsStartZeit.toISOString()}"
+                data-route="${fracht.startOrt} → ${fracht.zielOrt}" data-fahrzeug="${eintrag.fahrzeugName}"
+              >✅ Einplanen</button>`;
             }
             html += `</div>`;
           });
@@ -3469,7 +3414,6 @@
     const urlaubGeloggt = new Set();
     const gesperrteFahrzeuge = new Set(); // Fahrzeuge, bei denen Annehmen/Einplanen scheiterte - nicht erneut versuchen (sonst häufen sich unverplante Aufträge)
 
-    log(`Sicherheitsabstand zum Fensterende: ${aktuellerPlanungspuffer().toFixed(1)} h (${ladePrognoseLog().length} Messungen von Prognose vs. Spiel-Plan).`);
     for (let runde = 1; runde <= MAX_RUNDEN; runde++) {
       if (abgebrochen()) { log('⏹ Vom Nutzer gestoppt.', 'fi-warn'); break; }
 
@@ -3557,7 +3501,7 @@
         const fahrzeugName = z.eintrag.fahrzeugName;
         const freiAbVorher = z.eintrag.freiAbZeit;
         try {
-          const beschreibung = `${fahrzeugName}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2)} €/km · ${Math.round(bewertung.deckungsbeitragEuro / bewertung.gesamtStunden)} €/h (${Math.round(bewertung.gesamtStunden)} h) · Beladung ab ${bewertung.beladungsStartZeit.toLocaleString('de-DE')} · Ankunft ${bewertung.ankunftZeit.toLocaleString('de-DE')}${bewertung.folge ? ` · danach ${bewertung.folge.fracht.startOrt} → ${bewertung.folge.fracht.zielOrt} (zusammen ${Math.round(bewertung.folge.paarEff)} €/h)` : ''}`;
+          const beschreibung = `${fahrzeugName.split(' · ')[0]}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · Leerfahrt ${Math.round(bewertung.anfahrtKm)} km`;
           if (trocken) {
             const f = fleet.find(x => String(x.status.vehicleId) === String(z.eintrag.vehicleId));
             f.status = { ...f.status, freiAbZeit: bewertung.ankunftZeit, freiAbOrt: fracht.zielOrt };
