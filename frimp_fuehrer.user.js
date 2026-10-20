@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.61
+// @version      0.29.62
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.61';
+  const SCRIPT_VERSION = '0.29.62';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2374,37 +2374,40 @@
       #fi-dashboard .fi-dash-accept-btn { min-height: 0 !important; height: 22px !important; padding: 0 10px !important; font-size: 11.5px !important; line-height: 1 !important; width: auto !important; }
       #fi-dashboard input[type=checkbox] { min-height: 0 !important; width: 13px !important; height: 13px !important; margin: 0 4px 0 0 !important; }
 
-      /* ====== Live-Konsole (Scan/Berechnung) - nur transform/opacity-Animationen (GPU, kaum CPU) ====== */
-      .fi-scan { grid-column: 1 / -1; display: flex; gap: 14px; align-items: center; padding: 10px 14px; border-radius: 10px;
-        border: 1px solid rgba(94,234,212,.35); background: linear-gradient(135deg, rgba(8,24,40,.9), rgba(12,12,34,.9)); box-shadow: inset 0 0 22px rgba(34,211,238,.10); }
-      .fi-scan-radar { position: relative; width: 64px; height: 64px; flex-shrink: 0; border-radius: 50%; border: 1px solid rgba(94,234,212,.55);
-        background: radial-gradient(circle, rgba(34,211,238,.12), transparent 70%); overflow: hidden; }
-      .fi-scan-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(34,211,238,.6), rgba(34,211,238,0) 30%); animation: fi-spin 2.2s linear infinite; will-change: transform; }
-      .fi-scan-ring { position: absolute; inset: 14px; border-radius: 50%; border: 1px solid rgba(94,234,212,.28); }
-      .fi-scan-ring.r2 { inset: 26px; }
-      .fi-scan-blip { position: absolute; width: 5px; height: 5px; border-radius: 50%; background: #67e8f9; box-shadow: 0 0 6px #22d3ee; opacity: 0; animation: fi-blip 2.2s ease-out infinite; }
-      .fi-scan-blip.b1 { left: 40px; top: 14px; animation-delay: .3s; }
-      .fi-scan-blip.b2 { left: 16px; top: 38px; animation-delay: 1.1s; }
-      .fi-scan-blip.b3 { left: 44px; top: 44px; animation-delay: 1.7s; }
-      @keyframes fi-spin { to { transform: rotate(360deg); } }
-      @keyframes fi-blip { 0% { opacity: 0; transform: scale(.4); } 15% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(1.8); } }
-      .fi-scan-main { flex: 1; min-width: 0; }
-      .fi-scan-head { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #67e8f9; font-weight: 800; }
+      /* ====== Live-Konsole (Scan/Berechnung) - Transport-Look, nur transform/opacity (GPU) ====== */
+      .fi-scan { grid-column: 1 / -1; padding: 10px 14px 12px; border-radius: 10px;
+        border: 1px solid rgba(255,217,138,.28); background: rgba(255,255,255,.045); }
+      .fi-scan-head { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: #ffd98a; font-weight: 800; }
       .fi-scan-stufe { color: #9aa5b8; letter-spacing: .02em; text-transform: none; font-weight: 600; text-align: right; }
-      .fi-scan-bar { position: relative; height: 4px; border-radius: 2px; background: rgba(255,255,255,.08); overflow: hidden; margin: 7px 0; }
-      .fi-scan-bar > i { display: block; height: 100%; width: 2%; background: linear-gradient(90deg, #22d3ee, #a78bfa); transition: width .3s; }
-      .fi-scan-bar::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 25%; background: linear-gradient(90deg, transparent, rgba(255,255,255,.6), transparent); transform: translateX(-100%); animation: fi-shimmer 1.4s linear infinite; }
-      @keyframes fi-shimmer { to { transform: translateX(400%); } }
-      .fi-scan-werte { display: flex; flex-wrap: wrap; gap: 2px 16px; font: 600 12px ui-monospace, Consolas, monospace; color: #9fd8ea; }
-      .fi-scan-werte b { color: #fff; }
+      .fi-road { position: relative; height: 26px; margin: 8px 0 6px; border-radius: 6px; background: rgba(8,10,18,.75); border: 1px solid rgba(255,255,255,.08); overflow: hidden; }
+      .fi-road-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 2%; background: linear-gradient(90deg, rgba(245,184,75,.05), rgba(245,184,75,.32)); transition: width .3s; }
+      .fi-road-dashes { position: absolute; left: 0; right: -40px; top: 12px; height: 2px; background: repeating-linear-gradient(90deg, rgba(255,217,138,.55) 0 14px, transparent 14px 28px); animation: fi-road 1s linear infinite; will-change: transform; }
+      @keyframes fi-road { to { transform: translateX(-28px); } }
+      .fi-road-ziel { position: absolute; right: 6px; top: 3px; font-size: 14px; opacity: .9; }
+      .fi-road-start { position: absolute; left: 4px; top: 3px; font-size: 13px; opacity: .8; }
+      .fi-truck { position: absolute; top: 1px; left: 0; font-size: 19px; line-height: 22px; transform: scaleX(-1); transition: left .3s; filter: drop-shadow(0 1px 2px rgba(0,0,0,.6)); }
+      .fi-truck > span { display: inline-block; animation: fi-ruettel .35s ease-in-out infinite alternate; }
+      @keyframes fi-ruettel { from { transform: translateY(0); } to { transform: translateY(-1.5px); } }
+      .fi-scan-werte { display: flex; flex-wrap: wrap; gap: 2px 16px; font: 600 12px ui-monospace, Consolas, monospace; color: #9aa5b8; }
+      .fi-scan-werte b { color: #ffd98a; }
       .fi-scan-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-      .fi-scan-chip { font: 700 10.5px ui-monospace, Consolas, monospace; padding: 2px 7px; border-radius: 5px; border: 1px solid rgba(255,255,255,.14); color: #6b7a90; }
-      .fi-scan-chip.rechnet { color: #67e8f9; border-color: #22d3ee; animation: fi-puls .8s ease-in-out infinite alternate; }
-      .fi-scan-chip.fertig { color: #86efac; border-color: rgba(134,239,172,.6); background: rgba(20,60,30,.35); }
-      .fi-scan-chip.leer { color: #6b7a90; opacity: .6; }
+      .fi-scan-chip { font: 700 10.5px ui-monospace, Consolas, monospace; padding: 2px 7px; border-radius: 5px; border: 1px solid rgba(255,255,255,.14); color: #6f7b90; }
+      .fi-scan-chip.rechnet { color: #ffd98a; border-color: #f5b84b; animation: fi-puls .7s ease-in-out infinite alternate; }
+      .fi-scan-chip.fertig { color: #8ef2a8; border-color: rgba(142,242,168,.55); background: rgba(20,60,30,.30); }
+      .fi-scan-chip.leer { color: #6f7b90; opacity: .6; }
       @keyframes fi-puls { from { opacity: .5; } to { opacity: 1; } }
+      .fi-scan-feed { margin-top: 6px; font: 600 11.5px ui-monospace, Consolas, monospace; color: #dbe2f0; display: flex; flex-direction: column; gap: 1px; }
+      .fi-scan-feed > div { animation: fi-einflug .3s ease-out backwards; }
+      .fi-scan-feed > div:nth-last-child(n+3) { opacity: .55; }
       .fi-scan.fi-scan-fertig * { animation-play-state: paused !important; }
-      @media (prefers-reduced-motion: reduce) { .fi-scan * { animation: none !important; } }
+      @keyframes fi-einflug { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+      @keyframes fi-wachs { from { opacity: 0; transform: scaleX(0); } to { opacity: 1; transform: none; } }
+      /* schrittweiser Aufbau: Karten und Tourenplan fliegen gestaffelt ein */
+      .fi-einflug { animation: fi-einflug .4s ease-out backwards; animation-delay: calc(var(--i, 0) * 80ms); }
+      .fi-aufbau .fi-dash-timeline-row { animation: fi-einflug .4s ease-out backwards; animation-delay: calc(var(--i, 0) * 70ms); }
+      .fi-aufbau .fi-dash-phase-block { transform-origin: left center; animation: fi-wachs .5s ease-out backwards; animation-delay: calc(var(--i, 0) * 70ms + 150ms); }
+      #fi-info-chips .fi-dash-pill { animation: fi-einflug .4s ease-out backwards; }
+      @media (prefers-reduced-motion: reduce) { .fi-scan *, .fi-einflug, .fi-aufbau *, #fi-info-chips * { animation: none !important; } }
 
       /* ====== Timeline (mehrere Fahrzeuge auf einen Blick) ====== */
       .fi-dash-timeline-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; font-size: 11px; color: #cbd5e1; }
@@ -3160,7 +3163,7 @@
           // liefert bereits eine ganze Woche an Tagen - kein Mehrfach-Nachladen
           // mehr nötig (das hat vorher nur Duplikate erzeugt, siehe Chat).
           timelineHtml += baueTimelineKopfzeileHtml(fensterStartMs, fensterEndeMs, markerMs, markerLabel);
-          fleet.forEach(entry => {
+          fleet.forEach((entry, zeilenIndex) => {
             const vehicleId = entry.status?.vehicleId;
             const urlaubFz = (urlaubsSperren.get(entry.name) ?? []).filter(u => u.bis > new Date());
             const heim = bestimmeHeimkehr(vehicleId, entry.status?.freiAbOrt, urlaubFz, fuhrparkDetails.get(String(vehicleId)));
@@ -3176,12 +3179,15 @@
               : '';
             const labelInhalt = `<span class="fi-lbl-name">${symbol} ${vehicleId ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}">${entry.name}</a>` : entry.name}</span>${rueckrufHtml}`;
             const trackInhalt = baueTimelineTrackHtml(entry.status?.phasen, fensterStartMs, fensterEndeMs, markerMs);
-            timelineHtml += `<div class="fi-dash-timeline-row">
+            timelineHtml += `<div class="fi-dash-timeline-row" style="--i:${zeilenIndex}">
               <div class="fi-dash-timeline-label"${urlaubTip ? ` data-fi-tip="${tipText(urlaubTip)}"` : ''}>${labelInhalt}</div>
               <div class="fi-dash-timeline-track">${trackInhalt}</div>
             </div>`;
           });
         }
+        // Aufbau-Animation nur beim ersten Zeichnen (spätere Aktualisierungen flackern nicht)
+        timelineEl.classList.toggle('fi-aufbau', !timelineEl.dataset.gezeigt);
+        timelineEl.dataset.gezeigt = '1';
         timelineEl.innerHTML = timelineHtml;
         timelineEl.querySelectorAll('.fi-rueckruf-btn').forEach(btn => {
           btn.addEventListener('click', async () => {
@@ -3343,13 +3349,13 @@
           // Fahrzeuge ohne buchbaren Auftrag (nicht einplanbar, Frist nicht zu halten, Urlaub, ...) werden ausgeblendet
           const besteProFahrzeug = loeseFahrzeugKonflikte(besteProFahrzeugRoh).filter(e => e.beste);
           if (!besteProFahrzeug.length) html += '<div class="fi-empty">Kein Fahrzeug einplanbar.</div>';
-          besteProFahrzeug.forEach(eintrag => {
+          besteProFahrzeug.forEach((eintrag, kartenIndex) => {
             const titel = eintrag.vehicleId
               ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(eintrag.vehicleId)}">🚐 ${eintrag.fahrzeugName}</a>`
               : `🚐 ${eintrag.fahrzeugName}`;
             const { fracht, bewertung, istKette, kette } = eintrag.beste;
             const eurProKm = bewertung.effektivProKm != null ? bewertung.effektivProKm.toFixed(2).replace('.', ',') : '–';
-            html += `<div class="fi-dash-card"><div class="fi-dash-card-title"><span>${titel}</span><span style="font-size:17px; color:#ffd98a;">${eurProKm} €/km</span></div>`;
+            html += `<div class="fi-dash-card fi-einflug" style="--i:${kartenIndex}"><div class="fi-dash-card-title"><span>${titel}</span><span style="font-size:17px; color:#ffd98a;">${eurProKm} €/km</span></div>`;
             html += `<div class="fi-dash-row"><strong>${fracht.startOrt} → ${fracht.zielOrt}</strong> (${fracht.entfernungKm ?? '?'} km)</div>`;
             if (istKette) {
               html += `<div class="fi-dash-bundle-item">↳ ${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt} · ${kette.etappe1.entfernungKm} km · ${fmtEuro(kette.etappe1.verguetungEuro ?? 0)}</div>`;
@@ -3457,13 +3463,12 @@
    */
   function baueScanKonsole(container, titel) {
     container.innerHTML = `<div class="fi-scan">
-      <div class="fi-scan-radar"><i class="fi-scan-sweep"></i><i class="fi-scan-ring"></i><i class="fi-scan-ring r2"></i><b class="fi-scan-blip b1"></b><b class="fi-scan-blip b2"></b><b class="fi-scan-blip b3"></b></div>
-      <div class="fi-scan-main">
-        <div class="fi-scan-head"><span class="fi-scan-titel"></span><span class="fi-scan-stufe"></span></div>
-        <div class="fi-scan-bar"><i></i></div>
-        <div class="fi-scan-werte"></div>
-        <div class="fi-scan-chips"></div>
-      </div></div>`;
+      <div class="fi-scan-head"><span class="fi-scan-titel"></span><span class="fi-scan-stufe"></span></div>
+      <div class="fi-road"><i class="fi-road-fill"></i><i class="fi-road-dashes"></i><span class="fi-road-start">🏢</span><span class="fi-road-ziel">🏁</span><span class="fi-truck"><span>🚚</span></span></div>
+      <div class="fi-scan-werte"></div>
+      <div class="fi-scan-chips"></div>
+      <div class="fi-scan-feed"></div>
+    </div>`;
     const wurzel = container.querySelector('.fi-scan');
     const q = sel => wurzel.querySelector(sel);
     q('.fi-scan-titel').textContent = titel;
@@ -3471,6 +3476,13 @@
     const chips = new Map();
     let angeboteAngezeigt = 0;
     let tween = null;
+    const zeigeFund = text => {
+      const feed = q('.fi-scan-feed');
+      const zeile = document.createElement('div');
+      zeile.textContent = text;
+      feed.appendChild(zeile);
+      while (feed.children.length > 4) feed.removeChild(feed.firstChild);
+    };
     const setzeWert = (k, html) => {
       let el = werte.get(k);
       if (!el) { el = document.createElement('span'); werte.set(k, el); q('.fi-scan-werte').appendChild(el); }
@@ -3478,10 +3490,16 @@
     };
     return {
       stufe: text => { q('.fi-scan-stufe').textContent = text; },
-      fortschritt: anteil => { q('.fi-scan-bar > i').style.width = `${Math.max(2, Math.min(100, Math.round(anteil * 100)))}%`; },
+      fortschritt: anteil => {
+        const pct = Math.max(2, Math.min(100, Math.round(anteil * 100)));
+        q('.fi-road-fill').style.width = `${pct}%`;
+        q('.fi-truck').style.left = `calc(${pct}% - 26px)`;
+      },
+      fund: zeigeFund,
       markt: (label, info) => {
         if (!info) return;
         setzeWert('seiten', `Seiten <b>${info.seite}/${info.gesamt}</b>`);
+        if (info.seite > 1 && info.angebote !== angeboteAngezeigt) zeigeFund(`📦 Seite ${info.seite}/${info.gesamt} · ${info.angebote.toLocaleString('de-DE')} Angebote`);
         // Zähler hochzählen (kurzer rAF-Tween, ~12 Frames) statt hart springen
         const ziel = info.angebote;
         const start = angeboteAngezeigt;
@@ -3542,6 +3560,10 @@
       ergebnis.push(e);
       const km = e?.kandidatenRangliste?.[0]?.bewertung?.effektivProKm;
       konsole?.fahrzeugStatus(kurz(f), km != null ? 'fertig' : 'leer', km != null ? `${km.toFixed(2).replace('.', ',')} €/km` : '–');
+      const top = e?.kandidatenRangliste?.[0];
+      konsole?.fund(top
+        ? `🚚 ${kurz(f)} → ${top.fracht.startOrt} → ${top.fracht.zielOrt} · ${km.toFixed(2).replace('.', ',')} €/km`
+        : `🚚 ${kurz(f)} – nichts einplanbar`);
       if (balken) konsole?.fortschritt(0.65 + 0.35 * ((i + 1) / flotte.length));
     }
     return ergebnis;
