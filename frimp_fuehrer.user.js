@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.48
+// @version      0.29.49
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.48';
+  const SCRIPT_VERSION = '0.29.49';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -708,6 +708,24 @@
   }
 
   /**
+   * Begründung, warum ein Auftrag noch nicht einplanbar ist - mit dem Zeitpunkt,
+   * ab dem er es wird. Unterscheidet "liegt hinter dem Fensterende" von "liegt
+   * im Sicherheitsabstand davor" (siehe aktuellerPlanungspuffer) und rundet die
+   * Fensterlänge (kommt als Dezimalzahl, weil das Ende minutengenau vom Spiel
+   * gelesen wird).
+   */
+  function baueEinplanbarHinweis(beladungsStartZeit, planungsfensterEnde) {
+    const puffer = aktuellerPlanungspuffer();
+    const fensterStunden = Math.round(PLANUNGSFENSTER_STUNDEN);
+    const planbarAb = new Date(beladungsStartZeit.getTime() + puffer * 3600 * 1000 - PLANUNGSFENSTER_STUNDEN * 3600 * 1000);
+    const hinterEnde = beladungsStartZeit.getTime() > planungsfensterEnde.getTime();
+    const grund = hinterEnde
+      ? `liegt hinter dem Ende des ${fensterStunden}-h-Planungsfensters (${planungsfensterEnde.toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })})`
+      : `liegt weniger als ${puffer.toFixed(1)} h vor dem Fensterende (${planungsfensterEnde.toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}) - zu knapp für die Schätzgenauigkeit`;
+    return `Nächstmöglicher Beladungsstart (${beladungsStartZeit.toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}) ${grund} - einplanbar ab ca. ${planbarAb.toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}`;
+  }
+
+  /**
    * Fahrer-Restzeiten AM ZEITPUNKT, ab dem das Fahrzeug frei ist (nicht "jetzt").
    * Die Live-Werte (driver_time_status.php) gelten nur für jetzt; wird das
    * Fahrzeug erst in Stunden/Tagen frei, hängt der Zustand davon ab, was im
@@ -871,9 +889,7 @@
     // "nächstmöglicher Beladungsstart").
     const planungsfensterEnde = new Date(Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000);
     const einplanbar = beladungsStartZeit.getTime() + aktuellerPlanungspuffer() * 3600 * 1000 <= planungsfensterEnde.getTime();
-    const einplanbarHinweis = einplanbar
-      ? null
-      : `Nächstmöglicher Beladungsstart (${beladungsStartZeit.toLocaleString('de-DE')}) liegt außerhalb des ${PLANUNGSFENSTER_STUNDEN}h-Planungsfensters (Fenster endet ${planungsfensterEnde.toLocaleString('de-DE')}) - noch nicht einplanbar, erst annehmen und später einplanen`;
+    const einplanbarHinweis = einplanbar ? null : baueEinplanbarHinweis(beladungsStartZeit, planungsfensterEnde);
 
     // Anfahrt = LEER (kein Auftrag geladen), Fracht-Fahrt = BELADEN - unterschiedlicher Verbrauch!
     // Verschleiß fließt NICHT mehr ein - laut Tour-Abrechnungen im Spiel kostet
@@ -1103,9 +1119,7 @@
     // gegen freiAbZeit (Bugfix, siehe Chat).
     const planungsfensterEnde = new Date(Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000);
     const einplanbar = beladungsStartZeit.getTime() + aktuellerPlanungspuffer() * 3600 * 1000 <= planungsfensterEnde.getTime();
-    const einplanbarHinweis = einplanbar
-      ? null
-      : `Nächstmöglicher Beladungsstart (${beladungsStartZeit.toLocaleString('de-DE')}) liegt außerhalb des ${PLANUNGSFENSTER_STUNDEN}h-Planungsfensters (Fenster endet ${planungsfensterEnde.toLocaleString('de-DE')}) - noch nicht einplanbar, erst annehmen und später einplanen`;
+    const einplanbarHinweis = einplanbar ? null : baueEinplanbarHinweis(beladungsStartZeit, planungsfensterEnde);
 
     return {
       anfahrtKm, gesamtStunden, ankunftZeit, schaffbar, effektivProKm, deckungsbeitragEuro,
@@ -1288,9 +1302,7 @@
 
     const planungsfensterEnde = new Date(Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000);
     const einplanbar = beladungsStartZeit.getTime() + aktuellerPlanungspuffer() * 3600 * 1000 <= planungsfensterEnde.getTime();
-    const einplanbarHinweis = einplanbar
-      ? null
-      : `Nächstmöglicher Beladungsstart (${beladungsStartZeit.toLocaleString('de-DE')}) liegt außerhalb des ${PLANUNGSFENSTER_STUNDEN}h-Planungsfensters (Fenster endet ${planungsfensterEnde.toLocaleString('de-DE')}) - noch nicht einplanbar, erst annehmen und später einplanen`;
+    const einplanbarHinweis = einplanbar ? null : baueEinplanbarHinweis(beladungsStartZeit, planungsfensterEnde);
 
     return {
       anfahrtKm, gesamtStunden, ankunftZeit, schaffbar, effektivProKm, deckungsbeitragEuro,
