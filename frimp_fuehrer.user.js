@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.47
+// @version      0.29.48
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.47';
+  const SCRIPT_VERSION = '0.29.48';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3241,8 +3241,13 @@
           const zielTreffer = filtereNachZielstadt(passende, rueckfrachtFilter.zielStadt, rueckfrachtFilter.zielRadiusKm ?? 0).length;
           infoHtml += `<div class="fi-dash-row ${zielTreffer === 0 ? 'fi-warn' : 'fi-muted'}">🎯 davon ${zielTreffer} mit Ziel "${rueckfrachtFilter.zielStadt}"${rueckfrachtFilter.zielRadiusKm > 0 ? ` (±${rueckfrachtFilter.zielRadiusKm}km Umkreis)` : ' (exakt)'}</div>`;
         }
-        if (!FAHRZEUG_SPEZIFIKATIONEN[kategorieLabel]) {
-          infoHtml += `<div class="fi-dash-row fi-warn">⚠ Für "${kategorieLabel}" noch keine echten Verbrauchsdaten - Kostenschätzung nutzt Platzhalter.</div>`;
+        // Maßgeblich ist die Spezifikation der tatsächlich fahrenden Fahrzeuge
+        // (Zugmaschine bei Sattelzug-Kombis), nicht der Name der Frachtkategorie:
+        // Getreidekipper fahren mit der Standard-Sattelzugmaschine, deren
+        // Verbrauch (25/32 L/100 km) aus den Abschlussmeldungen bestätigt ist.
+        const ohneSpezifikation = [...new Set(kompatibleFleet.map(f => f.verbrauchsTyp ?? f.typ))].filter(t => !FAHRZEUG_SPEZIFIKATIONEN[t]);
+        if (ohneSpezifikation.length) {
+          infoHtml += `<div class="fi-dash-row fi-warn">⚠ Für "${ohneSpezifikation.join('", "')}" noch keine echten Verbrauchsdaten - Kostenschätzung nutzt Platzhalter.</div>`;
         }
         if (inkompatibleFleet.length) {
           console.log(`[FI-Helper] ${inkompatibleFleet.length} Fahrzeug(e) übersprungen (anderer Typ): ${inkompatibleFleet.map(f => f.name).join(', ')}`);
