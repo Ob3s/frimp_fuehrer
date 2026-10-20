@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.60
+// @version      0.29.61
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.60';
+  const SCRIPT_VERSION = '0.29.61';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -676,23 +676,25 @@
    * @param {{zielStadt?: string, zielRadiusKm?: number}} filter
    * @returns {Promise<{angebote: FrachtAngebot[], gescannteSeiten: number, gesamtSeiten: number|null}>}
    */
-  async function fetchAllOffersForBodyType(bodyType, maxPages = 20, onProgress = () => {}, filter = {}) {
-    onProgress('Lade Seite 1 ...');
+  async function fetchAllOffersForBodyType(bodyType, maxPages = 500, onProgress = () => {}, filter = {}) {
+    onProgress('Lade Seite 1 ...', null);
     const erste = await fetchFreightMarktPageSafe(bodyType, 1, filter);
     let alle = [...erste.angebote];
     const gesamtSeiten = erste.pagination ? erste.pagination.totalPages : 1;
+    // maxPages ist nur noch ein Sicherheitsdeckel gegen Endlosschleifen - normalerweise werden ALLE Seiten geladen
     const zuLadendeSeiten = Math.min(gesamtSeiten, maxPages);
+    onProgress(`Lade Seite 1 von ${zuLadendeSeiten} ...`, { seite: 1, gesamt: zuLadendeSeiten, angebote: alle.length });
 
     // restliche Seiten in Batches parallel laden, um den Server nicht zu fluten
-    const BATCH_SIZE = 4;
+    const BATCH_SIZE = 5;
     for (let start = 2; start <= zuLadendeSeiten; start += BATCH_SIZE) {
       const seiten = [];
       for (let p = start; p < Math.min(start + BATCH_SIZE, zuLadendeSeiten + 1); p++) {
         seiten.push(p);
       }
-      onProgress(`Lade Seiten ${seiten[0]}–${seiten[seiten.length - 1]} von ${zuLadendeSeiten} ...`);
       const ergebnisse = await Promise.all(seiten.map(p => fetchFreightMarktPageSafe(bodyType, p, filter)));
       ergebnisse.forEach(e => { alle = alle.concat(e.angebote); });
+      onProgress(`Lade Seiten ${seiten[0]}–${seiten[seiten.length - 1]} von ${zuLadendeSeiten} ...`, { seite: seiten[seiten.length - 1], gesamt: zuLadendeSeiten, angebote: alle.length });
     }
 
     return { angebote: alle, gescannteSeiten: zuLadendeSeiten, gesamtSeiten };
@@ -1325,7 +1327,7 @@
    *        Ohne das würden Angebote mit Ziel Berlin, aber Startort in die falsche
    *        Richtung (z.B. erst weit nach Süden), fälschlich als "guter Rückweg" durchgehen.
    */
-  function findeBesteRoutenProFahrzeug(angebote, fleet, zielReferenzStadt = null, zielRadiusKm = 0) {
+  function findeBesteRoutenProFahrzeug(angebote, fleet, zielReferenzStadt = null, zielRadiusKm = 0, ketten = true) {
     // Umweg-Freigrenze: bis hierhin keine Strafe, das ist ein normaler
     // Schlenker. Darüber hinaus wird jeder weitere Prozentpunkt Umweg mit
     // STRAFE_PRO_UMWEG_PUNKT vom effektiven €/km abgezogen - kein hartes
@@ -1368,7 +1370,10 @@
         ? geschaetzteStrassenKm(fahrzeug.status.freiAbOrt, zielReferenzStadt)
         : null;
 
+      // Nur Komplettladungen sind automatisch buchbar (Teilladungen irrelevant) - spart bei
+      // vollem Markt-Scan (alle Seiten) den Großteil der Rechenzeit.
       const einzelBewertungen = angeboteFuerDirekt
+        .filter(a => a.kapazitaet === 'Komplettladung' && a.jobId)
         .map(fracht => {
           const bewertung = bewerteFrachtFuerFahrzeug(fracht, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (bewertung && direktKm) {
@@ -1379,24 +1384,16 @@
         })
         .filter(x => x.bewertung !== null);
 
-      const bundleBewertungen = baueBundlesFuerAlleRouten(angeboteFuerDirekt, fahrzeug.stellplaetze ?? null)
-        .map(bundleFrachten => {
-          const { fracht, bewertung } = bewerteBundleFuerFahrzeug(
-            bundleFrachten, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null
-          );
-          if (bewertung && direktKm) {
-            const gesamtFahrKm = bewertung.anfahrtKm + (fracht.entfernungKm ?? 0);
-            bewertung.umwegProzent = Math.round(((gesamtFahrKm / direktKm) - 1) * 100);
-          }
-          return { fracht, bewertung, istBundle: true, bundleFrachten };
-        })
-        .filter(x => x.bewertung !== null);
+      const bundleBewertungen = []; // Teilladungs-Bündel sind nicht automatisch buchbar
 
       // Ketten-Kandidaten (Etappe 1 → Zwischenstadt → Etappe 2 → Ziel) - nur
       // sinnvoll bei Rückfracht-Suche mit bekannter Zielstadt, siehe Chat:
       // kein zweiter Scan nötig, wir mischen einfach denselben Datensatz.
-      const kettenBewertungen = zielReferenzStadt
-        ? baueKettenKandidaten(angebote, zielReferenzStadt, zielRadiusKm)
+      // 🏠-Fahrzeuge suchen zusätzlich Ketten (2 Komplettladungen), die in der Firma enden
+      const kettenZiel = !ketten ? null : (zielReferenzStadt || (fahrzeug.heimkehr ? (parseFirmenstandort() || 'Berlin') : null));
+      const kettenRadius = zielReferenzStadt ? zielRadiusKm : 30;
+      const kettenBewertungen = kettenZiel
+        ? baueKettenKandidaten(angebote.filter(a => a.kapazitaet === 'Komplettladung' && a.jobId), kettenZiel, kettenRadius)
             .map(kette => {
               const bewertung = bewerteKetteFuerFahrzeug(kette, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
               if (bewertung && direktKm) {
@@ -1419,32 +1416,7 @@
             .filter(x => x.bewertung !== null)
         : [];
 
-      // Mehrstufige Ketten (2-3 Etappen, je Etappe ggf. schon gebündelt) -
-      // anders als die einfache 2-Etappen-Kette oben läuft das IMMER, nicht
-      // nur bei Rückfracht-Suche, da jede Etappe ihre eigene Anfahrt-Basis
-      // hat und nicht an der aktuellen Fahrzeugposition hängen muss.
-      const legsProRoute = baueLegsProRoute(angebote, fahrzeug.stellplaetze ?? null);
-      const mehrstufigeKettenBewertungen = baueMehrstufigeKetten(legsProRoute, 3)
-        .filter(etappen => !zielReferenzStadt || filtereNachZielstadt([{ zielOrt: etappen[etappen.length - 1].zielOrt }], zielReferenzStadt, zielRadiusKm).length > 0)
-        .map(etappen => {
-          const bewertung = bewerteMehrstufigeKetteFuerFahrzeug(etappen, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
-          if (bewertung && direktKm) {
-            const gesamtFahrKm = bewertung.anfahrtKm + etappen.reduce((s, e) => s + (e.entfernungKm ?? 0), 0);
-            bewertung.umwegProzent = Math.round(((gesamtFahrKm / direktKm) - 1) * 100);
-          }
-          const virtuelleFracht = {
-            startOrt: etappen[0].startOrt,
-            zielOrt: etappen[etappen.length - 1].zielOrt,
-            entfernungKm: etappen.reduce((s, e) => s + (e.entfernungKm ?? 0), 0),
-            verguetungEuro: etappen.reduce((s, e) => s + (e.verguetungGesamt ?? 0), 0),
-            frachtName: etappen.map(e => `${e.startOrt}→${e.zielOrt}`).join(' + '),
-            lieferfrist: etappen[etappen.length - 1].fruehesteFrist,
-            jobId: null, // wird über die Einzel-Aufträge jeder Etappe angenommen, nicht als ein Klick
-            preisProKm: null,
-          };
-          return { fracht: virtuelleFracht, bewertung, istMehrstufigeKette: true, etappen };
-        })
-        .filter(x => x.bewertung !== null);
+      const mehrstufigeKettenBewertungen = []; // Teilladungs-/Mehrstufen-Ketten sind nicht automatisch buchbar
 
       // Urlaub: nichts planen, das mit einem (beantragten) Urlaub eines Fahrers
       // des Fahrzeugs kollidiert (Tour + Heimfahrt muss vor Urlaubsbeginn enden).
@@ -1464,7 +1436,7 @@
           const etappe2Passt = b.zwischenankunft && (b.zwischenankunft.getTime() + 2 * 3600 * 1000) <= fensterEndeMs;
           return beideKomplett && !!etappe2Passt && !!k.kette.etappe1.jobId && !!k.kette.etappe2.jobId;
         }
-        return !!k.fracht?.jobId;
+        return k.fracht?.kapazitaet === 'Komplettladung' && !!k.fracht?.jobId;
       };
       const bewertungen = [...einzelBewertungen, ...bundleBewertungen, ...kettenBewertungen, ...mehrstufigeKettenBewertungen]
         .filter(istBuchbar)
@@ -1530,7 +1502,7 @@
 
         const folgeKandidaten = [];
         angebote.forEach(f => {
-          if (!f.startOrt || !f.jobId || belegt.has(f.jobId)) return;
+          if (!f.startOrt || !f.jobId || f.kapazitaet !== 'Komplettladung' || belegt.has(f.jobId)) return;
           const anfahrt = geschaetzteStrassenKm(k.fracht.zielOrt, f.startOrt);
           if (anfahrt === null || anfahrt > FOLGE_MAX_ANFAHRT_KM) return;
           const kmGesamt = anfahrt + (f.entfernungKm ?? 0);
@@ -2402,6 +2374,38 @@
       #fi-dashboard .fi-dash-accept-btn { min-height: 0 !important; height: 22px !important; padding: 0 10px !important; font-size: 11.5px !important; line-height: 1 !important; width: auto !important; }
       #fi-dashboard input[type=checkbox] { min-height: 0 !important; width: 13px !important; height: 13px !important; margin: 0 4px 0 0 !important; }
 
+      /* ====== Live-Konsole (Scan/Berechnung) - nur transform/opacity-Animationen (GPU, kaum CPU) ====== */
+      .fi-scan { grid-column: 1 / -1; display: flex; gap: 14px; align-items: center; padding: 10px 14px; border-radius: 10px;
+        border: 1px solid rgba(94,234,212,.35); background: linear-gradient(135deg, rgba(8,24,40,.9), rgba(12,12,34,.9)); box-shadow: inset 0 0 22px rgba(34,211,238,.10); }
+      .fi-scan-radar { position: relative; width: 64px; height: 64px; flex-shrink: 0; border-radius: 50%; border: 1px solid rgba(94,234,212,.55);
+        background: radial-gradient(circle, rgba(34,211,238,.12), transparent 70%); overflow: hidden; }
+      .fi-scan-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(34,211,238,.6), rgba(34,211,238,0) 30%); animation: fi-spin 2.2s linear infinite; will-change: transform; }
+      .fi-scan-ring { position: absolute; inset: 14px; border-radius: 50%; border: 1px solid rgba(94,234,212,.28); }
+      .fi-scan-ring.r2 { inset: 26px; }
+      .fi-scan-blip { position: absolute; width: 5px; height: 5px; border-radius: 50%; background: #67e8f9; box-shadow: 0 0 6px #22d3ee; opacity: 0; animation: fi-blip 2.2s ease-out infinite; }
+      .fi-scan-blip.b1 { left: 40px; top: 14px; animation-delay: .3s; }
+      .fi-scan-blip.b2 { left: 16px; top: 38px; animation-delay: 1.1s; }
+      .fi-scan-blip.b3 { left: 44px; top: 44px; animation-delay: 1.7s; }
+      @keyframes fi-spin { to { transform: rotate(360deg); } }
+      @keyframes fi-blip { 0% { opacity: 0; transform: scale(.4); } 15% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(1.8); } }
+      .fi-scan-main { flex: 1; min-width: 0; }
+      .fi-scan-head { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #67e8f9; font-weight: 800; }
+      .fi-scan-stufe { color: #9aa5b8; letter-spacing: .02em; text-transform: none; font-weight: 600; text-align: right; }
+      .fi-scan-bar { position: relative; height: 4px; border-radius: 2px; background: rgba(255,255,255,.08); overflow: hidden; margin: 7px 0; }
+      .fi-scan-bar > i { display: block; height: 100%; width: 2%; background: linear-gradient(90deg, #22d3ee, #a78bfa); transition: width .3s; }
+      .fi-scan-bar::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 25%; background: linear-gradient(90deg, transparent, rgba(255,255,255,.6), transparent); transform: translateX(-100%); animation: fi-shimmer 1.4s linear infinite; }
+      @keyframes fi-shimmer { to { transform: translateX(400%); } }
+      .fi-scan-werte { display: flex; flex-wrap: wrap; gap: 2px 16px; font: 600 12px ui-monospace, Consolas, monospace; color: #9fd8ea; }
+      .fi-scan-werte b { color: #fff; }
+      .fi-scan-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+      .fi-scan-chip { font: 700 10.5px ui-monospace, Consolas, monospace; padding: 2px 7px; border-radius: 5px; border: 1px solid rgba(255,255,255,.14); color: #6b7a90; }
+      .fi-scan-chip.rechnet { color: #67e8f9; border-color: #22d3ee; animation: fi-puls .8s ease-in-out infinite alternate; }
+      .fi-scan-chip.fertig { color: #86efac; border-color: rgba(134,239,172,.6); background: rgba(20,60,30,.35); }
+      .fi-scan-chip.leer { color: #6b7a90; opacity: .6; }
+      @keyframes fi-puls { from { opacity: .5; } to { opacity: 1; } }
+      .fi-scan.fi-scan-fertig * { animation-play-state: paused !important; }
+      @media (prefers-reduced-motion: reduce) { .fi-scan * { animation: none !important; } }
+
       /* ====== Timeline (mehrere Fahrzeuge auf einen Blick) ====== */
       .fi-dash-timeline-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; font-size: 11px; color: #cbd5e1; }
       .fi-dash-timeline-legend span { display: inline-flex; align-items: center; gap: 6px; }
@@ -3238,7 +3242,9 @@
       reloadBtn.disabled = true;
       const originalText = loadBtn.textContent;
       loadBtn.textContent = 'Lade …';
-      resultsEl.innerHTML = '<div class="fi-empty">Starte Scan …</div>';
+      const kategorieVorab = bodyTypeSelect.selectedOptions[0]?.textContent ?? '';
+      const konsole = baueScanKonsole(resultsEl, `Frachtbörse · ${kategorieVorab}`);
+      konsole.stufe('Starte …');
 
       // Protokoll für die Diagnose-Anzeige zurücksetzen - sammelt ab hier
       // jeden zusätzlichen Seitenaufruf dieses Laufs (siehe protokolliereAbruf).
@@ -3267,11 +3273,19 @@
         if (cacheIstFrisch && !erzwingeNeuladen) {
           marktErgebnis = cacheEintrag;
           ausCache = true;
+          konsole.stufe('Markt aus Zwischenspeicher');
+          konsole.markt(kategorieVorab, { seite: marktErgebnis.gescannteSeiten ?? 1, gesamt: marktErgebnis.gescannteSeiten ?? 1, angebote: marktErgebnis.angebote.length });
+          konsole.fortschritt(0.6);
         } else {
-          marktErgebnis = await fetchAllOffersForBodyType(bodyType, 20, status => { resultsEl.innerHTML = `<div class="fi-empty">${status}</div>`; });
+          marktErgebnis = await fetchAllOffersForBodyType(bodyType, 500, (status, info) => {
+            konsole.stufe(status);
+            if (info) { konsole.markt(kategorieVorab, info); konsole.fortschritt(0.6 * info.seite / Math.max(1, info.gesamt)); }
+          });
           speichereMarktCache(cacheKey, { ...marktErgebnis, zeitstempel: Date.now() });
         }
 
+        konsole.stufe('Flotte & Fahrerzeiten laden …');
+        konsole.fortschritt(0.62);
         const fleetRoh = await fetchFleetStatus();
         const { angebote, gescannteSeiten, gesamtSeiten } = marktErgebnis;
         const kategorieLabel = options.find(o => o.value === bodyType)?.label ?? bodyType;
@@ -3324,7 +3338,8 @@
         } else if (!kompatibleFleet.length) {
           html += '<div class="fi-empty">Kein Fahrzeug mit passendem Typ für diese Kategorie gefunden.</div>';
         } else {
-          const besteProFahrzeugRoh = findeBesteRoutenProFahrzeug(passende, kompatibleFleet, rueckfrachtFilter.zielStadt || null, rueckfrachtFilter.zielRadiusKm ?? 0);
+          const besteProFahrzeugRoh = await berechneBesteRouten(passende, kompatibleFleet, rueckfrachtFilter.zielStadt || null, rueckfrachtFilter.zielRadiusKm ?? 0, konsole);
+          konsole.ende('Fertig');
           // Fahrzeuge ohne buchbaren Auftrag (nicht einplanbar, Frist nicht zu halten, Urlaub, ...) werden ausgeblendet
           const besteProFahrzeug = loeseFahrzeugKonflikte(besteProFahrzeugRoh).filter(e => e.beste);
           if (!besteProFahrzeug.length) html += '<div class="fi-empty">Kein Fahrzeug einplanbar.</div>';
@@ -3395,16 +3410,12 @@
       autofillBtn.textContent = '⏹ Stopp';
       loadBtn.disabled = true;
       reloadBtn.disabled = true;
-      resultsEl.innerHTML = `<div class="fi-dash-card" style="grid-column: 1 / -1;">
-        <div class="fi-dash-card-title"><span id="fi-autofill-status">⚡ Starte …</span></div>
-        <div style="height:5px; border-radius:3px; background:rgba(255,255,255,.1); overflow:hidden;"><div id="fi-autofill-bar" style="height:100%; width:2%; background:#ffd98a; transition:width .3s;"></div></div>
-        <div id="fi-autofill-log"></div></div>`;
+      resultsEl.innerHTML = '<div id="fi-autofill-konsole" style="grid-column: 1 / -1;"></div><div id="fi-autofill-log" style="grid-column: 1 / -1;"></div>';
       const logEl = document.getElementById('fi-autofill-log');
-      const statusEl = document.getElementById('fi-autofill-status');
-      const barEl = document.getElementById('fi-autofill-bar');
+      const konsole = baueScanKonsole(document.getElementById('fi-autofill-konsole'), 'Alle Fahrzeuge befüllen');
       const zeigeFortschritt = ({ runde, schritt, gesamt, text }) => {
-        if (statusEl) statusEl.textContent = `⚡ Runde ${runde} · Schritt ${schritt}/${gesamt} · ${text} …`;
-        if (barEl) barEl.style.width = `${Math.max(2, Math.round((schritt / gesamt) * 100))}%`;
+        konsole.stufe(`Runde ${runde} · Schritt ${schritt}/${gesamt} · ${text} …`);
+        konsole.fortschritt(schritt / gesamt);
         if (!autofillAbbruch) autofillBtn.textContent = `⏹ Stopp · ${schritt}/${gesamt}`;
       };
       const log = (text, klasse = 'fi-muted') => {
@@ -3418,15 +3429,17 @@
           abgebrochen: () => autofillAbbruch,
           trocken,
           fortschritt: zeigeFortschritt,
+          konsole,
         });
-        if (statusEl) statusEl.textContent = '⚡ Fertig';
-        if (barEl) barEl.style.width = '100%';
+        konsole.fortschritt(1);
+        konsole.ende('Fertig');
         log(trocken
           ? `<strong>Trockenlauf:</strong> ${ergebnis.anzahlAngenommen} Aufträge · ${fmtEuro(ergebnis.summeEuro)}`
           : `<strong>Fertig:</strong> ${ergebnis.anzahlAngenommen} Aufträge eingeplant · ${fmtEuro(ergebnis.summeEuro)}`, 'fi-good');
       } catch (e) {
         console.error('[FI-Helper] Automatisches Befüllen fehlgeschlagen', e);
         log(`Fehler: ${e.message}`, 'fi-bad');
+        konsole.ende('Fehler');
       } finally {
         autofillLaeuft = false;
         autofillBtn.textContent = originalText;
@@ -3435,6 +3448,103 @@
         await aktualisiereFlotte();
       }
     });
+  }
+
+  /**
+   * Live-Konsole für Scan/Berechnung: Radar-Animation (reines CSS), Fortschrittsbalken,
+   * Zähler und je Fahrzeug ein Chip (wartet → rechnet → fertig mit €/km).
+   * Alle Aufrufe sind billig (Text/Klassen); Animationen laufen auf der GPU.
+   */
+  function baueScanKonsole(container, titel) {
+    container.innerHTML = `<div class="fi-scan">
+      <div class="fi-scan-radar"><i class="fi-scan-sweep"></i><i class="fi-scan-ring"></i><i class="fi-scan-ring r2"></i><b class="fi-scan-blip b1"></b><b class="fi-scan-blip b2"></b><b class="fi-scan-blip b3"></b></div>
+      <div class="fi-scan-main">
+        <div class="fi-scan-head"><span class="fi-scan-titel"></span><span class="fi-scan-stufe"></span></div>
+        <div class="fi-scan-bar"><i></i></div>
+        <div class="fi-scan-werte"></div>
+        <div class="fi-scan-chips"></div>
+      </div></div>`;
+    const wurzel = container.querySelector('.fi-scan');
+    const q = sel => wurzel.querySelector(sel);
+    q('.fi-scan-titel').textContent = titel;
+    const werte = new Map();
+    const chips = new Map();
+    let angeboteAngezeigt = 0;
+    let tween = null;
+    const setzeWert = (k, html) => {
+      let el = werte.get(k);
+      if (!el) { el = document.createElement('span'); werte.set(k, el); q('.fi-scan-werte').appendChild(el); }
+      el.innerHTML = html;
+    };
+    return {
+      stufe: text => { q('.fi-scan-stufe').textContent = text; },
+      fortschritt: anteil => { q('.fi-scan-bar > i').style.width = `${Math.max(2, Math.min(100, Math.round(anteil * 100)))}%`; },
+      markt: (label, info) => {
+        if (!info) return;
+        setzeWert('seiten', `Seiten <b>${info.seite}/${info.gesamt}</b>`);
+        // Zähler hochzählen (kurzer rAF-Tween, ~12 Frames) statt hart springen
+        const ziel = info.angebote;
+        const start = angeboteAngezeigt;
+        let n = 0;
+        cancelAnimationFrame(tween);
+        const schritt = () => {
+          n++;
+          angeboteAngezeigt = Math.round(start + (ziel - start) * Math.min(1, n / 12));
+          setzeWert('angebote', `Angebote <b>${angeboteAngezeigt.toLocaleString('de-DE')}</b>`);
+          if (n < 12) tween = requestAnimationFrame(schritt);
+        };
+        tween = requestAnimationFrame(schritt);
+      },
+      fahrzeuge: namen => {
+        q('.fi-scan-chips').innerHTML = '';
+        chips.clear();
+        namen.forEach(n => {
+          const c = document.createElement('span');
+          c.className = 'fi-scan-chip';
+          c.textContent = n;
+          q('.fi-scan-chips').appendChild(c);
+          chips.set(n, c);
+        });
+      },
+      fahrzeugStatus: (name, zustand, text = '') => {
+        const c = chips.get(name);
+        if (!c) return;
+        c.className = `fi-scan-chip ${zustand}`;
+        c.textContent = text ? `${name} · ${text}` : name;
+      },
+      wert: setzeWert,
+      ende: text => { if (text) q('.fi-scan-stufe').textContent = text; wurzel.classList.add('fi-scan-fertig'); cancelAnimationFrame(tween); },
+    };
+  }
+
+  const naechsterFrame = () => new Promise(r => {
+    let fertig = false;
+    const los = () => { if (!fertig) { fertig = true; r(); } };
+    requestAnimationFrame(los);
+    setTimeout(los, 60); // Hintergrund-Tab: rAF pausiert
+  });
+
+  /**
+   * Bewertet die Flotte fahrzeugweise (statt in einem Rutsch), damit die Konsole
+   * live zeigt, welches Fahrzeug gerade rechnet und was es bisher Bestes fand.
+   * Ergebnis identisch zu findeBesteRoutenProFahrzeug(angebote, flotte, ...).
+   */
+  async function berechneBesteRouten(angebote, flotte, zielStadt, radius, konsole = null, { ketten = true, balken = true } = {}) {
+    const kurz = f => f.name.split(' · ')[0];
+    konsole?.stufe(`Berechne ${angebote.length.toLocaleString('de-DE')} Angebote × ${flotte.length} Fahrzeuge`);
+    konsole?.fahrzeuge(flotte.map(kurz));
+    const ergebnis = [];
+    for (let i = 0; i < flotte.length; i++) {
+      const f = flotte[i];
+      konsole?.fahrzeugStatus(kurz(f), 'rechnet');
+      await naechsterFrame();
+      const [e] = findeBesteRoutenProFahrzeug(angebote, [f], zielStadt, radius, ketten);
+      ergebnis.push(e);
+      const km = e?.kandidatenRangliste?.[0]?.bewertung?.effektivProKm;
+      konsole?.fahrzeugStatus(kurz(f), km != null ? 'fertig' : 'leer', km != null ? `${km.toFixed(2).replace('.', ',')} €/km` : '–');
+      if (balken) konsole?.fortschritt(0.65 + 0.35 * ((i + 1) / flotte.length));
+    }
+    return ergebnis;
   }
 
   /**
@@ -3447,7 +3557,7 @@
    * den Tourenplaner, dessen Request noch nicht erfasst ist.
    * @param {{options: {value: string, label: string}[], log: Function, abgebrochen: Function, trocken?: boolean}} param
    */
-  async function befuelleFlotteAutomatisch({ options, log, abgebrochen, trocken = false, fortschritt = () => {} }) {
+  async function befuelleFlotteAutomatisch({ options, log, abgebrochen, trocken = false, fortschritt = () => {}, konsole = null }) {
     const MAX_RUNDEN = 15;
     let simulierteFlotte = null;
     let anzahlAngenommen = 0;
@@ -3517,7 +3627,7 @@
         if (!marktPools.has(label)) {
           let markt = holeMarktCache(marktCacheSchluessel(option.value));
           if (!(markt && (Date.now() - markt.zeitstempel) < MARKT_CACHE_TTL_MS)) {
-            markt = await fetchAllOffersForBodyType(option.value, 20, () => {});
+            markt = await fetchAllOffersForBodyType(option.value, 500, (t, info) => { konsole?.markt(label, info); });
             speichereMarktCache(marktCacheSchluessel(option.value), { ...markt, zeitstempel: Date.now() });
           }
           const pool = filtereNachAufbau(markt.angebote, label).filter(a => a.kapazitaet === 'Komplettladung' && a.jobId);
@@ -3527,7 +3637,7 @@
         const kompatibleFleet = fleet.filter(f => f.typ === label);
         if (!pool.length || !kompatibleFleet.length) continue;
 
-        const beste = loeseFahrzeugKonflikte(findeBesteRoutenProFahrzeug(pool, kompatibleFleet, null, 0));
+        const beste = loeseFahrzeugKonflikte(await berechneBesteRouten(pool, kompatibleFleet, null, 0, konsole, { ketten: false, balken: false }));
         beste.forEach(eintrag => {
           const k = eintrag.beste;
           if (!k || !k.fracht.jobId) return;
