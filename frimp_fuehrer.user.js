@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.53
+// @version      0.29.54
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.53';
+  const SCRIPT_VERSION = '0.29.54';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2262,49 +2262,49 @@
         overflow-x: hidden; /* mit min-width:0 auf der Timeline-Spur sollte hier nichts mehr überlaufen */
       }
       #fi-dashboard h2 {
-        font-size: 22px;
+        font-size: 18px;
         font-weight: 800;
         color: #fff6d9;
-        margin: 0 0 16px;
+        margin: 0 0 8px;
         display: flex;
         align-items: center;
         gap: 10px;
       }
       #fi-dashboard h3 {
-        font-size: 15px;
+        font-size: 12px;
         text-transform: uppercase;
         letter-spacing: .08em;
         color: #ffd98a;
         font-weight: 800;
-        margin: 28px 0 14px;
+        margin: 14px 0 6px;
       }
-      .fi-dash-pills { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+      .fi-dash-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
       .fi-dash-pill {
-        padding: 12px 18px;
-        border-radius: 14px;
+        padding: 6px 12px;
+        border-radius: 10px;
         background: rgba(255,255,255,.05);
         border: 1px solid rgba(255,255,255,.10);
-        font-size: 16px;
+        font-size: 13px;
         font-weight: 800;
       }
       .fi-dash-pill.is-negative { color: #ffb3b3; border-color: rgba(248,113,113,.30); background: rgba(127,29,29,.16); }
       .fi-dash-pill.is-positive { color: #a9f7c4; border-color: rgba(134,239,172,.30); background: rgba(20,60,30,.20); }
       .fi-dash-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-        gap: 16px;
+        grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+        gap: 8px;
       }
       .fi-dash-card {
-        padding: 20px;
-        border-radius: 16px;
+        padding: 10px 12px;
+        border-radius: 10px;
         background: rgba(255,255,255,.045);
         border: 1px solid rgba(255,255,255,.09);
       }
       .fi-dash-card-title {
-        font-size: 17px;
+        font-size: 13px;
         font-weight: 800;
         color: #fff;
-        margin-bottom: 10px;
+        margin-bottom: 4px;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -2313,7 +2313,7 @@
       }
       .fi-dash-card-title a { color: inherit; text-decoration: none; }
       .fi-dash-card-title a:hover { text-decoration: underline; }
-      .fi-dash-row { font-size: 14px; color: #dbe2f0; margin-top: 6px; line-height: 1.5; }
+      .fi-dash-row { font-size: 12.5px; color: #dbe2f0; margin-top: 2px; line-height: 1.4; }
       .fi-dash-row.fi-muted { color: #9aa5b8; }
       .fi-dash-row.fi-loc { color: #ffd98a; }
       .fi-dash-row.fi-warn { color: #ff9a6b; }
@@ -2321,55 +2321,55 @@
       .fi-dash-row.fi-bad { color: #ff8a8a; }
       .fi-dash-controls {
         display: flex;
-        gap: 14px;
+        gap: 8px;
         align-items: flex-end;
         flex-wrap: wrap;
-        padding: 20px;
-        border-radius: 16px;
+        padding: 8px 10px;
+        border-radius: 10px;
         background: rgba(255,255,255,.045);
         border: 1px solid rgba(255,255,255,.09);
-        margin-bottom: 20px;
+        margin-bottom: 8px;
       }
-      .fi-dash-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+      .fi-dash-field { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: #9aa5b8; }
       .fi-dash-select {
-        padding: 12px 14px;
-        border-radius: 12px;
+        padding: 5px 8px;
+        border-radius: 8px;
         background: rgba(255,255,255,.06);
         border: 1px solid rgba(255,255,255,.16);
         color: #f8fafc;
-        font-size: 14px;
-        min-width: 220px;
+        font-size: 12.5px;
+        min-width: 160px;
       }
       .fi-dash-btn {
-        padding: 13px 24px;
-        border-radius: 12px;
+        padding: 6px 12px;
+        border-radius: 8px;
         border: 1px solid rgba(255,217,138,.52);
         background: linear-gradient(180deg,#ffd98a,#f5b84b);
         color: #211404;
         font-weight: 800;
-        font-size: 14px;
+        font-size: 12.5px;
         cursor: pointer;
       }
       .fi-dash-btn:disabled { opacity: .55; cursor: default; }
       .fi-dash-btn-reload {
-        padding: 13px 16px;
-        border-radius: 12px;
+        padding: 5px 9px;
+        border-radius: 8px;
         border: 1px solid rgba(255,255,255,.16);
         background: rgba(255,255,255,.07);
         color: #f8fafc;
         cursor: pointer;
-        font-size: 15px;
+        font-size: 12.5px;
       }
-      .fi-dash-bundle-item { padding-left: 12px; font-size: 12.5px; color: #9aa5b8; margin-top: 4px; }
+      .fi-dash-bundle-item { padding-left: 10px; font-size: 11.5px; color: #9aa5b8; margin-top: 1px; }
       .fi-dash-accept-btn {
-        margin-top: 12px;
-        padding: 10px 16px;
-        border-radius: 10px;
+        margin-top: 6px;
+        padding: 3px 10px;
+        border-radius: 7px;
         border: 1px solid rgba(255,217,138,.52);
         background: linear-gradient(180deg,#ffd98a,#f5b84b);
         color: #211404;
         font-weight: 800;
-        font-size: 13px;
+        font-size: 11.5px;
         cursor: pointer;
       }
       .fi-dash-accept-btn:disabled { opacity: .55; cursor: default; }
@@ -2889,7 +2889,7 @@
 
       <div id="fi-dash-fleet" class="fi-dash-grid"><div class="fi-empty">Lade Flotte …</div></div>
 
-      <h3>Frachtbörse – beste Routen berechnen</h3>
+      <h3>Frachtbörse</h3>
       <div class="fi-dash-controls">
         <div class="fi-dash-field">
           <label>Fahrzeugkategorie</label>
@@ -2903,16 +2903,16 @@
           <label>Umkreis (km)</label>
           <input type="number" id="fi-dash-return-radius" value="30" min="0" max="500" class="fi-dash-select" style="min-width:80px;" title="0 = nur exakte Stadt, sonst z.B. 30km für Vororte wie Potsdam bei Berlin">
         </div>
-        <button type="button" id="fi-dash-load-btn" class="fi-dash-btn">Beste Routen berechnen</button>
+        <button type="button" id="fi-dash-load-btn" class="fi-dash-btn">Routen berechnen</button>
         <button type="button" id="fi-dash-reload-btn" class="fi-dash-btn-reload" title="Cache umgehen und frisch laden">🔄</button>
         <div class="fi-dash-field">
-          <label><input type="checkbox" id="fi-dash-autofill-dry" checked> Trockenlauf (nichts buchen)</label>
+          <label><input type="checkbox" id="fi-dash-autofill-dry" checked> Trockenlauf</label>
         </div>
-        <button type="button" id="fi-dash-autofill-btn" class="fi-dash-btn" title="Nimmt für ALLE Fahrzeuge fortlaufend die besten Komplettladungen an und plant sie ein, bis das Planungsfenster voll ist">⚡ Alle Fahrzeuge befüllen</button>
+        <button type="button" id="fi-dash-autofill-btn" class="fi-dash-btn" title="Nimmt für ALLE Fahrzeuge fortlaufend die besten Komplettladungen an und plant sie ein, bis das Planungsfenster voll ist">⚡ Alle befüllen</button>
       </div>
       <div id="fi-dash-results" class="fi-dash-grid"></div>
 
-      <h3>Tourenplan – alle Fahrzeuge auf einen Blick</h3>
+      <h3>Tourenplan</h3>
       <div id="fi-dash-timeline"><div class="fi-empty">Lade Tourenplan …</div></div>
 
       <div id="fi-dash-contracts" class="fi-dash-grid"></div>
@@ -3286,17 +3286,15 @@
             const titel = eintrag.vehicleId
               ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(eintrag.vehicleId)}">🚐 ${eintrag.fahrzeugName}</a>`
               : `🚐 ${eintrag.fahrzeugName}`;
-            html += `<div class="fi-dash-card"><div class="fi-dash-card-title">${titel}</div>`;
             const { fracht, bewertung, istKette, kette } = eintrag.beste;
             const eurProKm = bewertung.effektivProKm != null ? bewertung.effektivProKm.toFixed(2).replace('.', ',') : '–';
-            html += `<div class="fi-dash-row" style="font-size:22px; font-weight:800; color:#ffd98a; margin:2px 0 6px;">${eurProKm} €/km</div>`;
+            html += `<div class="fi-dash-card"><div class="fi-dash-card-title"><span>${titel}</span><span style="font-size:17px; color:#ffd98a;">${eurProKm} €/km</span></div>`;
             html += `<div class="fi-dash-row"><strong>${fracht.startOrt} → ${fracht.zielOrt}</strong> (${fracht.entfernungKm ?? '?'} km)</div>`;
             if (istKette) {
               html += `<div class="fi-dash-bundle-item">↳ ${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt} · ${kette.etappe1.entfernungKm} km · ${fmtEuro(kette.etappe1.verguetungEuro ?? 0)}</div>`;
               html += `<div class="fi-dash-bundle-item">↳ ${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt} · ${kette.etappe2.entfernungKm} km · ${fmtEuro(kette.etappe2.verguetungEuro ?? 0)}</div>`;
             }
-            html += `<div class="fi-dash-row fi-muted">${istKette ? '2 Etappen' : fracht.frachtName} · ${fmtEuro(fracht.verguetungEuro ?? 0)}</div>`;
-            html += `<div class="fi-dash-row">Leerfahrt: ${Math.round(bewertung.anfahrtKm)} km</div>`;
+            html += `<div class="fi-dash-row fi-muted">${istKette ? '2 Etappen' : fracht.frachtName} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · Leerfahrt ${Math.round(bewertung.anfahrtKm)} km</div>`;
 
             if (istKette) {
               html += `<button type="button" class="fi-dash-accept-btn fi-kette-btn"
@@ -3304,13 +3302,13 @@
                 data-vehicle-id="${eintrag.vehicleId}" data-frei-ab="${eintrag.freiAbZeit.toISOString()}" data-beladung="${bewertung.beladungsStartZeit.toISOString()}"
                 data-route-a="${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt}" data-route-b="${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt}"
                 data-fahrzeug="${eintrag.fahrzeugName}"
-              >✅ Einplanen</button>`;
+              >Einplanen</button>`;
             } else {
               html += `<button type="button" class="fi-dash-accept-btn fi-accept-btn"
                 data-job-id="${fracht.jobId}" data-vehicle-id="${eintrag.vehicleId}"
                 data-frei-ab="${eintrag.freiAbZeit.toISOString()}" data-beladung="${bewertung.beladungsStartZeit.toISOString()}"
                 data-route="${fracht.startOrt} → ${fracht.zielOrt}" data-fahrzeug="${eintrag.fahrzeugName}"
-              >✅ Einplanen</button>`;
+              >Einplanen</button>`;
             }
             html += `</div>`;
           });
@@ -3351,7 +3349,7 @@
       autofillBtn.textContent = '⏹ Stopp';
       loadBtn.disabled = true;
       reloadBtn.disabled = true;
-      resultsEl.innerHTML = '<div class="fi-dash-card" style="grid-column: 1 / -1;"><div class="fi-dash-card-title">⚡ Befüllen läuft …</div><div id="fi-autofill-log"></div></div>';
+      resultsEl.innerHTML = '<div class="fi-dash-card" style="grid-column: 1 / -1;"><div class="fi-dash-card-title">⚡ Befüllen …</div><div id="fi-autofill-log"></div></div>';
       const logEl = document.getElementById('fi-autofill-log');
       const log = (text, klasse = 'fi-muted') => {
         logEl.insertAdjacentHTML('beforeend', `<div class="fi-dash-row ${klasse}">${text}</div>`);
@@ -3365,7 +3363,7 @@
           trocken,
         });
         log(trocken
-          ? `<strong>Trockenlauf:</strong> ${ergebnis.anzahlAngenommen} Aufträge · ${fmtEuro(ergebnis.summeEuro)} (nichts gebucht)`
+          ? `<strong>Trockenlauf:</strong> ${ergebnis.anzahlAngenommen} Aufträge · ${fmtEuro(ergebnis.summeEuro)}`
           : `<strong>Fertig:</strong> ${ergebnis.anzahlAngenommen} Aufträge eingeplant · ${fmtEuro(ergebnis.summeEuro)}`, 'fi-good');
       } catch (e) {
         console.error('[FI-Helper] Automatisches Befüllen fehlgeschlagen', e);
