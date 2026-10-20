@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.55
+// @version      0.29.56
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.55';
+  const SCRIPT_VERSION = '0.29.56';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2280,13 +2280,15 @@
       }
       .fi-dash-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
       .fi-dash-pill {
-        padding: 6px 12px;
-        border-radius: 10px;
+        padding: 3px 10px;
+        border-radius: 8px;
         background: rgba(255,255,255,.05);
         border: 1px solid rgba(255,255,255,.10);
-        font-size: 13px;
+        font-size: 12px;
         font-weight: 800;
       }
+      .fi-dash-pill.is-warn { color: #ffb48a; border-color: rgba(255,154,107,.45); background: rgba(127,60,20,.18); }
+      .fi-dash-pill.is-muted { color: #9aa5b8; }
       .fi-dash-pill.is-negative { color: #ffb3b3; border-color: rgba(248,113,113,.30); background: rgba(127,29,29,.16); }
       .fi-dash-pill.is-positive { color: #a9f7c4; border-color: rgba(134,239,172,.30); background: rgba(20,60,30,.20); }
       .fi-dash-grid {
@@ -2893,8 +2895,6 @@
       <h2>🚚 Frimp Führer <span style="font-size:12px; font-weight:700; color:#9aa5b8;">v${SCRIPT_VERSION}</span></h2>
       <div id="fi-dash-header" class="fi-dash-pills"><div class="fi-dash-pill">Lade …</div></div>
 
-      <div id="fi-dash-fleet" class="fi-dash-grid"><div class="fi-empty">Lade Flotte …</div></div>
-
       <h3>Frachtbörse</h3>
       <div class="fi-dash-controls">
         <div class="fi-dash-field">
@@ -2946,20 +2946,11 @@
 
     // --- Kopfbereich (Kontostand/Statistik) ---
     async function aktualisiereKopf() {
-      const kontostand = parseKontostand();
-      const stats = parseStatBadges();
-      let html = '';
-      if (kontostand) {
-        html += `<div class="fi-dash-pill ${kontostand.negativ ? 'is-negative' : 'is-positive'}">💰 ${kontostand.text}</div>`;
-      }
-      Object.entries(stats).forEach(([k, v]) => { html += `<div class="fi-dash-pill">${k}: ${v}</div>`; });
-      html += `<div class="fi-dash-pill">⛽ ${ASSUMPTIONS.dieselPreisProLiter.toFixed(3).replace('.', ',')} €/L${dieselPreisLive == null ? ' (Fallback)' : ''}</div>`;
-      html += `<button type="button" id="fi-sync-pill" class="fi-dash-pill" style="cursor:pointer;" title="Mitschnitt in privates GitHub-Repo hochladen (PC und Handy zusammen auswerten)">${syncPillText()}</button>`;
+      // Info-Feld: Chips (Warnungen/Urlaubsantrag) füllt aktualisiereFlotte(); hier nur der Sync-Knopf
       const kopfEl = document.getElementById('fi-dash-header');
-      if (kopfEl) {
-        kopfEl.innerHTML = html;
-        kopfEl.querySelector('#fi-sync-pill')?.addEventListener('click', () => { bedienSyncPill().catch(e => window.alert(`Sync: ${e.message}`)); });
-      }
+      if (!kopfEl) return;
+      kopfEl.innerHTML = `<span id="fi-info-chips" style="display:contents;"></span><button type="button" id="fi-sync-pill" class="fi-dash-pill is-muted" style="cursor:pointer;" title="Mitschnitt in privates GitHub-Repo hochladen (PC und Handy zusammen auswerten)">${syncPillText()}</button>`;
+      kopfEl.querySelector('#fi-sync-pill')?.addEventListener('click', () => { bedienSyncPill().catch(e => window.alert(`Sync: ${e.message}`)); });
     }
     await aktualisiereKopf();
 
@@ -2970,8 +2961,8 @@
     // Fetch-Anzahl niedrig halten).
     let flotteFuerAuswahl = [];
     async function aktualisiereFlotte() {
-      const fleetEl = document.getElementById('fi-dash-fleet');
-      if (!fleetEl) return;
+      const infoEl = document.getElementById('fi-info-chips');
+      if (!infoEl) return;
       const [fleet, fuhrparkDetails] = await Promise.all([fetchFleetStatus(), fetchFuhrparkDetails()]);
       flotteFuerAuswahl = fleet;
 
@@ -2986,24 +2977,18 @@
         phasenTypen: [...new Set((f.status?.phasen ?? []).map(p => p.type))],
       })));
 
+      // Info-Feld: nur was für die Planung zählt - Warnungen, offene Urlaubsanträge
+      // (genehmigte Urlaube: 🌴 am Fahrzeug im Tourenplan; die Planung beachtet alle).
+      const tipText = t => t.replace(/"/g, '&quot;');
       let html = '';
       const dispatchVehicleIds = new Set(fleet.map(f => String(f.status?.vehicleId ?? '')));
       const fehlendeFahrzeuge = Array.from(fuhrparkDetails.entries())
         .filter(([vehicleId, details]) => !details.hatFahrer && !dispatchVehicleIds.has(String(vehicleId)));
       if (fehlendeFahrzeuge.length) {
-        html += `<div class="fi-dash-card" style="border-color: rgba(255,154,107,.4);">
-          <div class="fi-dash-card-title">⚠ ${fehlendeFahrzeuge.length} Fahrzeug(e) ohne Fahrer</div>
-          ${fehlendeFahrzeuge.map(([, d]) => `<div class="fi-dash-row">🚐 ${d.typ || 'Unbekannter Typ'}</div>`).join('')}
-          <div class="fi-dash-row fi-muted">→ Fahrer in <a href="/game/fuhrpark.php" style="color:#ffd98a;">fuhrpark.php</a> zuweisen</div>
-        </div>`;
+        html += `<a class="fi-dash-pill is-warn" href="/game/fuhrpark.php" style="text-decoration:none;" data-fi-tip="${tipText(fehlendeFahrzeuge.map(([, d]) => d.typ || 'Unbekannter Typ').join('\n'))}">⚠ ${fehlendeFahrzeuge.length} ohne Fahrer</a>`;
       }
 
-      // Verschleiß & Hauptuntersuchung: Zustand-% und HU-Badge kommen direkt aus
-      // fuhrpark.php (siehe parseVerschleiss) - Warnschwelle ist NICHT selbst
-      // erfunden, sondern die vom Spiel selbst vergebene Klasse (mini-fill
-      // good/warn/danger, fi-inspection-due-badge--valid/warning/critical/
-      // expired/missing). Auflieger werden separat geprüft, da sie unabhängig
-      // vom Zugfahrzeug verschleißen/zur HU müssen.
+      // Verschleiß & Hauptuntersuchung (Schwelle = Spiel-Klasse, siehe parseVerschleiss)
       const verschleissWarnungen = [];
       fleet.forEach(f => {
         const vehicleId = f.status?.vehicleId;
@@ -3018,27 +3003,23 @@
           });
       });
       if (verschleissWarnungen.length) {
-        html += `<div class="fi-dash-card" style="border-color: rgba(255,92,92,.4);">
-          <div class="fi-dash-card-title">⚠ ${verschleissWarnungen.length} Warnung(en): Verschleiß / Hauptuntersuchung</div>
-          ${verschleissWarnungen.map(w => {
-            const teile = [];
-            if (w.zustandKritisch) teile.push(`Zustand ${w.info.zustandProzent != null ? w.info.zustandProzent + '%' : '?'} (${w.info.zustandStufe})`);
-            if (w.huKritisch) teile.push(`HU ${w.info.huDatum ?? '?'} (${w.info.huStatus})`);
-            return `<div class="fi-dash-row fi-warn">🔧 ${w.label}: ${teile.join(' · ')}</div>`;
-          }).join('')}
-          <div class="fi-dash-row fi-muted">→ Details/Werkstatt in <a href="/game/fuhrpark.php" style="color:#ffd98a;">fuhrpark.php</a></div>
-        </div>`;
+        const tip = verschleissWarnungen.map(w => {
+          const teile = [];
+          if (w.zustandKritisch) teile.push(`Zustand ${w.info.zustandProzent != null ? w.info.zustandProzent + '%' : '?'}`);
+          if (w.huKritisch) teile.push(`HU ${w.info.huDatum ?? '?'} (${w.info.huStatus})`);
+          return `${w.label}: ${teile.join(' · ')}`;
+        }).join('\n');
+        html += `<a class="fi-dash-pill is-warn" href="/game/fuhrpark.php" style="text-decoration:none;" data-fi-tip="${tipText(tip)}">🔧 ${verschleissWarnungen.length} Verschleiß/HU</a>`;
       }
 
-      // Bevorstehende Urlaube (auch beantragte) - die automatische Planung
-      // berücksichtigt sie bereits (siehe urlaubskonflikt).
+      // Urlaub: Hinweis NUR bei (noch) offenem Antrag; genehmigte -> 🌴 im Tourenplan
       const urlaubsSperren = await fetchUrlaubsSperren();
-      const kommendeUrlaube = [...urlaubsSperren.entries()].flatMap(([fzName, liste]) => liste.filter(u => u.bis > new Date()).map(u => ({ fzName, ...u })));
-      if (kommendeUrlaube.length) {
-        const kurz = d => d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
-        html += `<div class="fi-dash-pills" style="grid-column: 1 / -1;">${kommendeUrlaube.map(u =>
-          `<div class="fi-dash-pill" data-fi-tip="${`Urlaub ${u.fahrer} (${u.status}): ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')}\nAutomatische Touren enden samt Heimfahrt vor Urlaubsbeginn.`.replace(/"/g, '&quot;')}">🌴 ${u.fahrer.split(' ').pop()} · ${u.fzName.split(' · ')[0]} · ${kurz(u.von)}–${kurz(u.bis)}${/offen/i.test(u.status) ? ' ?' : ''}</div>`).join('')}</div>`;
-      }
+      const kurz = d => d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+      [...urlaubsSperren.entries()]
+        .flatMap(([fzName, liste]) => liste.filter(u => u.bis > new Date() && /offen/i.test(u.status)).map(u => ({ fzName, ...u })))
+        .forEach(u => {
+          html += `<a class="fi-dash-pill is-warn" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tipText(`Urlaubsantrag ${u.fahrer} (${u.fzName.split(' · ')[0]}): ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')}\nNoch offen - die Planung behandelt ihn schon wie genehmigt.`)}">🌴 Antrag ${u.fahrer.split(' ').pop()} · ${kurz(u.von)}–${kurz(u.bis)}</a>`;
+        });
 
       // Frachtverträge: nur ANZEIGE und Bewertung, keine Annahme - wie Abrufe im
       // Spiel ablaufen ist noch nicht beobachtet, eine Annahme wäre verbindlich.
@@ -3070,7 +3051,7 @@
       // Die einzelnen Fahrzeugkarten sind auf Wunsch entfallen (die Timeline zeigt
       // alles); übrig bleibt die Warnung für Fahrzeuge ohne Fahrer plus die
       // Verschleiß/HU-Warnung oben.
-      fleetEl.innerHTML = html;
+      infoEl.innerHTML = html;
 
       // --- Timeline: alle Fahrzeuge auf einen Blick (wie der spieleigene
       // Dispositionsplan, nur alle Fahrzeuge übereinander statt einzeln) ---
@@ -3121,12 +3102,15 @@
           timelineHtml += baueTimelineKopfzeileHtml(fensterStartMs, fensterEndeMs, markerMs, markerLabel);
           fleet.forEach(entry => {
             const vehicleId = entry.status?.vehicleId;
+            const urlaubFz = (urlaubsSperren.get(entry.name) ?? []).filter(u => u.bis > new Date());
+            const symbol = urlaubFz.length ? '🌴' : '🚐';
+            const urlaubTip = urlaubFz.map(u => `Urlaub ${u.fahrer} (${u.status}): ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')}`).join('\n');
             const labelInhalt = vehicleId
-              ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}">🚐 ${entry.name}</a>`
-              : `🚐 ${entry.name}`;
+              ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}">${symbol} ${entry.name}</a>`
+              : `${symbol} ${entry.name}`;
             const trackInhalt = baueTimelineTrackHtml(entry.status?.phasen, fensterStartMs, fensterEndeMs, markerMs);
             timelineHtml += `<div class="fi-dash-timeline-row">
-              <div class="fi-dash-timeline-label">${labelInhalt}</div>
+              <div class="fi-dash-timeline-label"${urlaubTip ? ` data-fi-tip="${tipText(urlaubTip)}"` : ''}>${labelInhalt}</div>
               <div class="fi-dash-timeline-track">${trackInhalt}</div>
             </div>`;
           });
