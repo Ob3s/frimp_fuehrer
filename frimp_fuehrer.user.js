@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.59
+// @version      0.29.60
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.59';
+  const SCRIPT_VERSION = '0.29.60';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2409,8 +2409,8 @@
       .fi-dash-timeline-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
       .fi-dash-timeline-label { width: 130px; flex-shrink: 0; font-size: 11px; font-weight: 700; display: flex; align-items: center; gap: 4px; }
       .fi-lbl-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .fi-rueckruf-btn { flex-shrink: 0; min-height: 0 !important; height: 16px !important; padding: 0 4px !important; font-size: 10px !important; line-height: 1 !important; border-radius: 4px; border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.08); color: #ffd98a; cursor: pointer; }
-      .fi-rueckruf-btn:disabled { opacity: .5; cursor: default; }
+      #fi-dashboard .fi-dash-timeline-label .fi-rueckruf-btn { flex-shrink: 0; min-height: 0 !important; height: 16px !important; width: auto !important; padding: 0 4px !important; font-size: 10px !important; line-height: 1 !important; border-radius: 4px; border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.08); color: #ffd98a; cursor: pointer; }
+      #fi-dashboard .fi-rueckruf-btn:disabled { opacity: .5; cursor: default; }
       .fi-dash-timeline-label a { color: inherit; text-decoration: none; }
       .fi-dash-timeline-label a:hover { text-decoration: underline; }
       .fi-dash-timeline-track {
