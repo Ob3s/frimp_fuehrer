@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.58
+// @version      0.29.59
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.58';
+  const SCRIPT_VERSION = '0.29.59';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2407,7 +2407,10 @@
       .fi-dash-timeline-legend span { display: inline-flex; align-items: center; gap: 6px; }
       .fi-dash-timeline-legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
       .fi-dash-timeline-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
-      .fi-dash-timeline-label { width: 110px; flex-shrink: 0; font-size: 11px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .fi-dash-timeline-label { width: 130px; flex-shrink: 0; font-size: 11px; font-weight: 700; display: flex; align-items: center; gap: 4px; }
+      .fi-lbl-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .fi-rueckruf-btn { flex-shrink: 0; min-height: 0 !important; height: 16px !important; padding: 0 4px !important; font-size: 10px !important; line-height: 1 !important; border-radius: 4px; border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.08); color: #ffd98a; cursor: pointer; }
+      .fi-rueckruf-btn:disabled { opacity: .5; cursor: default; }
       .fi-dash-timeline-label a { color: inherit; text-decoration: none; }
       .fi-dash-timeline-label a:hover { text-decoration: underline; }
       .fi-dash-timeline-track {
@@ -2772,36 +2775,41 @@
   }
 
   /**
-   * "Muss zurück in die Firma"-Markierung (🏠). Manuell per Klick im Tourenplan
-   * (localStorage, je Gerät) oder automatisch: Urlaub beginnt in <= 5 Tagen
-   * (Fahrer + Fahrzeug müssen dann am Firmensitz sein) bzw. HU kritisch/Zustand
-   * schlecht (Werkstatt). Erlischt von selbst, sobald das Fahrzeug am Firmensitz
+   * "Muss zurück in die Firma"-Anzeige (🏠), automatisch: Urlaub beginnt in <= 5
+   * Tagen (Fahrer + Fahrzeug müssen dann am Firmensitz sein) bzw. HU kritisch/
+   * Zustand schlecht (Werkstatt). Erlischt, sobald das Fahrzeug am Firmensitz
    * "frei ab" ist. Wirkung: die Bewertung rechnet die Leerfahrt vom Zielort
    * zurück zum Firmensitz mit ein (siehe findeBesteRoutenProFahrzeug).
    * @returns {{aktiv: boolean, grund: string|null, manuell: boolean}}
    */
-  const HEIMKEHR_KEY = 'fi_heimkehr_v1';
-  function ladeHeimkehrMarken() {
-    try { return JSON.parse(window.localStorage.getItem(HEIMKEHR_KEY) || '{}') || {}; } catch (e) { return {}; }
-  }
-  function speichereHeimkehrMarken(marken) {
-    try { window.localStorage.setItem(HEIMKEHR_KEY, JSON.stringify(marken)); } catch (e) {}
-  }
   function bestimmeHeimkehr(vehicleId, freiAbOrt, urlaubListe, details) {
     const heimat = parseFirmenstandort() || 'Berlin';
-    const marken = ladeHeimkehrMarken();
-    const id = String(vehicleId ?? '');
     const amFirmensitz = !!freiAbOrt && freiAbOrt === heimat;
-    if (marken[id] && amFirmensitz) { delete marken[id]; speichereHeimkehrMarken(marken); }
-    const manuell = !!marken[id] && !amFirmensitz;
-    let grund = manuell ? 'markiert' : null;
-    if (!grund && !amFirmensitz) {
+    let grund = null;
+    if (!amFirmensitz) {
       const bald = Date.now() + 5 * 24 * 3600 * 1000;
       if ((urlaubListe ?? []).some(u => u.bis > new Date() && u.von.getTime() <= bald)) grund = 'Urlaub steht an';
       const schlecht = i => i && (['critical', 'expired', 'missing'].includes(i.huStatus) || i.zustandStufe === 'danger');
       if (!grund && (schlecht(details?.verschleiss) || schlecht(details?.auflieger))) grund = 'Werkstatt/HU';
     }
-    return { aktiv: !!grund, grund, manuell };
+    return { aktiv: !!grund, grund, manuell: false };
+  }
+
+  /**
+   * "Rückruf zur Firma" wie der Knopf in der Disposition: das Spiel hängt ans
+   * Ende des Plans eine Leertour zum Firmensitz an (POST dispatch.php,
+   * dispatch_action=return_to_base, vehicle_id).
+   * @returns {Promise<string>} Meldung des Spiels
+   */
+  async function rufeFahrzeugZurueck(vehicleId) {
+    const body = new URLSearchParams({ dispatch_action: 'return_to_base', vehicle_id: String(vehicleId) });
+    const res = await fetch('/game/dispatch.php', {
+      method: 'POST', body, credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+    const doc = safeParseHtml(await res.text());
+    const fehler = doc.querySelector('.flash.error')?.textContent.replace(/\s+/g, ' ').trim();
+    if (fehler) throw new Error(fehler);
+    return doc.querySelector('.flash.success')?.textContent.replace(/\s+/g, ' ').trim() ?? 'Rückruf ausgelöst';
   }
 
   function baueFleetMitTyp(fleetMitLive, detailsMap, fallbackLabel, urlaubNachFahrzeug = new Map()) {
@@ -2956,14 +2964,6 @@
         <div class="fi-dash-field">
           <label>Fahrzeugkategorie</label>
           <select id="fi-dash-bodytype" class="fi-dash-select"></select>
-        </div>
-        <div class="fi-dash-field">
-          <label><input type="checkbox" id="fi-dash-only-return"> Zurück zur Firma</label>
-          <select id="fi-dash-return-vehicle" class="fi-dash-select" style="min-width:160px; display:none;"></select>
-        </div>
-        <div class="fi-dash-field" id="fi-dash-radius-field" style="display:none;">
-          <label>Umkreis (km)</label>
-          <input type="number" id="fi-dash-return-radius" value="30" min="0" max="500" class="fi-dash-select" style="min-width:80px;" title="0 = nur exakte Stadt, sonst z.B. 30km für Vororte wie Potsdam bei Berlin">
         </div>
         <button type="button" id="fi-dash-load-btn" class="fi-dash-btn">Routen berechnen</button>
         <button type="button" id="fi-dash-reload-btn" class="fi-dash-btn-reload" title="Cache umgehen und frisch laden">🔄</button>
@@ -3164,14 +3164,13 @@
             const urlaubTip = [
               heim.aktiv ? `🏠 muss zurück in die Firma (${heim.grund})` : '',
               ...urlaubFz.map(u => `🌴 Urlaub ${u.fahrer} (${u.status}): ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')}`),
-              vehicleId ? 'Klick auf das Symbol: Rückkehr zur Firma markieren/aufheben' : '',
             ].filter(Boolean).join('\n');
-            const symbolHtml = vehicleId
-              ? `<span class="fi-heim-toggle" data-vid="${vehicleId}" data-frei-ab-ort="${(entry.status?.freiAbOrt ?? '').replace(/"/g, '')}" data-ruhe="${urlaubFz.length ? '🌴' : '🚐'}" style="cursor:pointer;">${symbol}</span>`
-              : symbol;
-            const labelInhalt = vehicleId
-              ? `${symbolHtml} <a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}">${entry.name}</a>`
-              : `${symbolHtml} ${entry.name}`;
+            const heimatOrt = parseFirmenstandort() || 'Berlin';
+            const zeigeRueckruf = !!vehicleId && !!entry.status?.freiAbOrt && entry.status.freiAbOrt !== heimatOrt;
+            const rueckrufHtml = zeigeRueckruf
+              ? `<button type="button" class="fi-rueckruf-btn" data-vid="${vehicleId}" data-fi-tip="Rückruf zur Firma: Leertour nach ${heimatOrt} hinten an den Plan hängen">🏠↩</button>`
+              : '';
+            const labelInhalt = `<span class="fi-lbl-name">${symbol} ${vehicleId ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}">${entry.name}</a>` : entry.name}</span>${rueckrufHtml}`;
             const trackInhalt = baueTimelineTrackHtml(entry.status?.phasen, fensterStartMs, fensterEndeMs, markerMs);
             timelineHtml += `<div class="fi-dash-timeline-row">
               <div class="fi-dash-timeline-label"${urlaubTip ? ` data-fi-tip="${tipText(urlaubTip)}"` : ''}>${labelInhalt}</div>
@@ -3180,13 +3179,19 @@
           });
         }
         timelineEl.innerHTML = timelineHtml;
-        timelineEl.querySelectorAll('.fi-heim-toggle').forEach(el => {
-          el.addEventListener('click', () => {
-            const marken = ladeHeimkehrMarken();
-            const vid = el.dataset.vid;
-            if (marken[vid]) delete marken[vid]; else marken[vid] = 1;
-            speichereHeimkehrMarken(marken);
-            el.textContent = marken[vid] ? '🏠' : el.dataset.ruhe;
+        timelineEl.querySelectorAll('.fi-rueckruf-btn').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            btn.textContent = '…';
+            try {
+              await rufeFahrzeugZurueck(btn.dataset.vid);
+              await aktualisiereFlotte();
+            } catch (e) {
+              console.error('[FI-Helper] Rückruf fehlgeschlagen', e);
+              btn.textContent = '⚠';
+              btn.setAttribute('data-fi-tip', `Rückruf fehlgeschlagen: ${e.message}`);
+              btn.disabled = false;
+            }
           });
         });
       }
@@ -3213,32 +3218,10 @@
     const loadBtn = document.getElementById('fi-dash-load-btn');
     const reloadBtn = document.getElementById('fi-dash-reload-btn');
     const resultsEl = document.getElementById('fi-dash-results');
-    const onlyReturnCb = document.getElementById('fi-dash-only-return');
-    const returnVehicleSelect = document.getElementById('fi-dash-return-vehicle');
-    const returnRadiusInput = document.getElementById('fi-dash-return-radius');
-
-    // Dropdown mit den schon geladenen Fahrzeugen befüllen (siehe
-    // flotteFuerAuswahl oben) - erst sichtbar, wenn der Haken gesetzt ist.
-    function befuelleReturnVehicleSelect() {
-      const vorherigeWahl = returnVehicleSelect.value;
-      returnVehicleSelect.innerHTML = '';
-      flotteFuerAuswahl.forEach(f => {
-        if (!f.status?.vehicleId) return;
-        const opt = document.createElement('option');
-        opt.value = f.status.vehicleId;
-        opt.textContent = f.name;
-        returnVehicleSelect.appendChild(opt);
-      });
-      if (vorherigeWahl && Array.from(returnVehicleSelect.options).some(o => o.value === vorherigeWahl)) {
-        returnVehicleSelect.value = vorherigeWahl;
-      }
-    }
-    befuelleReturnVehicleSelect();
-    onlyReturnCb.addEventListener('change', () => {
-      returnVehicleSelect.style.display = onlyReturnCb.checked ? '' : 'none';
-      document.getElementById('fi-dash-radius-field').style.display = onlyReturnCb.checked ? '' : 'none';
-      if (onlyReturnCb.checked) befuelleReturnVehicleSelect();
-    });
+    // "Zurück zur Firma"-Filter ist entfallen (Rückruf per Knopf im Tourenplan, siehe rufeFahrzeugZurueck)
+    const onlyReturnCb = { checked: false };
+    const returnVehicleSelect = { value: '' };
+    const returnRadiusInput = { value: '0' };
 
     async function routenBerechnen(erzwingeNeuladen) {
       const bodyType = bodyTypeSelect.value;
