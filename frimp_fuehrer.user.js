@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.52
+// @version      0.29.53
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.52';
+  const SCRIPT_VERSION = '0.29.53';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -1345,21 +1345,13 @@
     const ANFAHRT_FREIGRENZE_KM = 150; // bis hierhin normale Positionierungsfahrt, keine Strafe
     const STRAFE_PRO_ANFAHRT_KM = 0.01; // €/km Abzug je km Anfahrt über der Freigrenze
 
-    // SCORE = NETTOGEWINN PRO FAHRZEUGSTUNDE (nicht pro km): Das knappe Gut eines
-    // Fahrzeugs ist Zeit - inklusive Anfahrt, Lade-/Entladezeit und Schicht-
-    // pausen (bei nur einem Fahrer 11 h je Schicht!). Ein Auftrag mit höherem
-    // €/km, der wegen Pausen/Anfahrt viel länger dauert, ist schlechter als ein
-    // etwas schwächerer mit weniger Stillstand (Beispiel PL 01 mit 1 Fahrer:
-    // 3,85 €/km = 101 €/h gegen 3,64 €/km = 139 €/h). Die Umweg-/Anfahrt-
-    // Strafen sind €/km-Werte und werden mit ~79 km/h in €/h umgerechnet.
-    const STRAFE_KMH_UMRECHNUNG = 79;
+    // SCORE = NETTOGEWINN PRO KM (inkl. Anfahrt) abzüglich Umweg-/Anfahrt-Strafen.
+    // (Zwischenzeitlich auf €/h umgestellt - Nutzer will €/km, 2026-10-20.)
     function kombinierterScore(bewertung) {
-      const h = bewertung.gesamtStunden;
-      if (!(h > 0) || bewertung.deckungsbeitragEuro == null) return -Infinity;
       const umweg = bewertung.umwegProzent ?? 0;
       const umwegStrafe = Math.max(0, umweg - UMWEG_FREIGRENZE_PROZENT) * STRAFE_PRO_UMWEG_PUNKT;
       const anfahrtStrafe = Math.max(0, (bewertung.anfahrtKm ?? 0) - ANFAHRT_FREIGRENZE_KM) * STRAFE_PRO_ANFAHRT_KM;
-      return bewertung.deckungsbeitragEuro / h - (umwegStrafe + anfahrtStrafe) * STRAFE_KMH_UMRECHNUNG;
+      return (bewertung.effektivProKm ?? -Infinity) - umwegStrafe - anfahrtStrafe;
     }
 
     // Bei Rückfracht-Suche dürfen Einzel-Routen und Bündel NUR Angebote mit
@@ -1532,14 +1524,14 @@
           const bF = bewerteFrachtFuerFahrzeug(f, folgeStatus, frischeLive, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (!bF || bF.schaffbar === false || bF.deckungsbeitragEuro == null) return;
           if (urlaubskonflikt(fahrzeug, f.zielOrt, bF.ankunftZeit)) return;
-          const paarStunden = basis.gesamtStunden + bF.gesamtStunden;
-          if (!(paarStunden > 0)) return;
-          const paarEff = (basis.deckungsbeitragEuro + bF.deckungsbeitragEuro) / paarStunden; // €/h über beide Aufträge
+          const paarKm = gesamtKmErster + bF.anfahrtKm + (f.entfernungKm ?? 0);
+          if (paarKm <= 0) return;
+          const paarEff = (basis.deckungsbeitragEuro + bF.deckungsbeitragEuro) / paarKm; // €/km über beide Aufträge
           if (!besteFolge || paarEff > besteFolge.paarEff) besteFolge = { fracht: f, bewertung: bF, paarEff };
         });
 
         if (besteFolge) {
-          const strafen = basis.deckungsbeitragEuro / basis.gesamtStunden - basis.kombiScore; // Umweg-/Anfahrt-Strafen des ersten Auftrags bleiben erhalten (in €/h)
+          const strafen = basis.effektivProKm - basis.kombiScore; // Umweg-/Anfahrt-Strafen des ersten Auftrags bleiben erhalten
           basis.kombiScore = besteFolge.paarEff - strafen;
           basis.folge = besteFolge;
         }
@@ -2383,27 +2375,27 @@
       .fi-dash-accept-btn:disabled { opacity: .55; cursor: default; }
 
       /* ====== Timeline (mehrere Fahrzeuge auf einen Blick) ====== */
-      .fi-dash-timeline-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; font-size: 12px; color: #cbd5e1; }
+      .fi-dash-timeline-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; font-size: 11px; color: #cbd5e1; }
       .fi-dash-timeline-legend span { display: inline-flex; align-items: center; gap: 6px; }
       .fi-dash-timeline-legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
-      .fi-dash-timeline-row { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
-      .fi-dash-timeline-label { width: 170px; flex-shrink: 0; font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .fi-dash-timeline-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+      .fi-dash-timeline-label { width: 110px; flex-shrink: 0; font-size: 11px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .fi-dash-timeline-label a { color: inherit; text-decoration: none; }
       .fi-dash-timeline-label a:hover { text-decoration: underline; }
       .fi-dash-timeline-track {
         position: relative;
         flex: 1;
         min-width: 0;
-        height: 38px;
+        height: 20px;
         background: rgba(255,255,255,.04);
-        border-radius: 8px;
+        border-radius: 5px;
         border: 1px solid rgba(255,255,255,.08);
         overflow: hidden; /* Blöcke bleiben strikt in ihrer eigenen Zeile - Tooltips laufen jetzt über ein eigenes fixed-position JS-System, siehe initFiTooltipSystem() */
       }
       .fi-dash-phase-block {
         position: absolute;
-        top: 4px;
-        height: 30px; /* EXPLIZIT statt bottom:4px - garantiert, dass jeder Block exakt gleich hoch ist, egal wie schmal */
+        top: 2px;
+        height: 16px; /* EXPLIZIT statt bottom:4px - garantiert, dass jeder Block exakt gleich hoch ist, egal wie schmal */
         border-radius: 3px;
         cursor: default;
         min-width: 6px; /* sonst sind kurze Lade-/Entladephasen (15-60 Min. auf 48h) praktisch unsichtbar */
@@ -2416,7 +2408,8 @@
         /* KEIN overflow:hidden hier - schneidet sonst den eigenen ::after-Tooltip mit ab */
       }
       .fi-dash-phase-time {
-        font-size: 10px;
+        font-size: 9px;
+        line-height: 16px;
         font-weight: 700;
         color: rgba(0,0,0,.65);
         padding-left: 4px;
@@ -2894,12 +2887,7 @@
       <h2>🚚 Frimp Führer <span style="font-size:12px; font-weight:700; color:#9aa5b8;">v${SCRIPT_VERSION}</span></h2>
       <div id="fi-dash-header" class="fi-dash-pills"><div class="fi-dash-pill">Lade …</div></div>
 
-      <h3>Tourenplan – alle Fahrzeuge auf einen Blick</h3>
-      <div id="fi-dash-timeline"><div class="fi-empty">Lade Tourenplan …</div></div>
-
       <div id="fi-dash-fleet" class="fi-dash-grid"><div class="fi-empty">Lade Flotte …</div></div>
-
-      <div id="fi-dash-contracts" class="fi-dash-grid"></div>
 
       <h3>Frachtbörse – beste Routen berechnen</h3>
       <div class="fi-dash-controls">
@@ -2923,6 +2911,12 @@
         <button type="button" id="fi-dash-autofill-btn" class="fi-dash-btn" title="Nimmt für ALLE Fahrzeuge fortlaufend die besten Komplettladungen an und plant sie ein, bis das Planungsfenster voll ist">⚡ Alle Fahrzeuge befüllen</button>
       </div>
       <div id="fi-dash-results" class="fi-dash-grid"></div>
+
+      <h3>Tourenplan – alle Fahrzeuge auf einen Blick</h3>
+      <div id="fi-dash-timeline"><div class="fi-empty">Lade Tourenplan …</div></div>
+
+      <div id="fi-dash-contracts" class="fi-dash-grid"></div>
+
     `;
 
     // Nach den Statistik-Karten einfügen, vor der (jetzt versteckten) Sperr-Meldung
@@ -3294,13 +3288,14 @@
               : `🚐 ${eintrag.fahrzeugName}`;
             html += `<div class="fi-dash-card"><div class="fi-dash-card-title">${titel}</div>`;
             const { fracht, bewertung, istKette, kette } = eintrag.beste;
-            const proStunde = bewertung.gesamtStunden > 0 ? Math.round(bewertung.deckungsbeitragEuro / bewertung.gesamtStunden) : null;
+            const eurProKm = bewertung.effektivProKm != null ? bewertung.effektivProKm.toFixed(2).replace('.', ',') : '–';
+            html += `<div class="fi-dash-row" style="font-size:22px; font-weight:800; color:#ffd98a; margin:2px 0 6px;">${eurProKm} €/km</div>`;
             html += `<div class="fi-dash-row"><strong>${fracht.startOrt} → ${fracht.zielOrt}</strong> (${fracht.entfernungKm ?? '?'} km)</div>`;
             if (istKette) {
               html += `<div class="fi-dash-bundle-item">↳ ${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt} · ${kette.etappe1.entfernungKm} km · ${fmtEuro(kette.etappe1.verguetungEuro ?? 0)}</div>`;
               html += `<div class="fi-dash-bundle-item">↳ ${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt} · ${kette.etappe2.entfernungKm} km · ${fmtEuro(kette.etappe2.verguetungEuro ?? 0)}</div>`;
             }
-            html += `<div class="fi-dash-row fi-muted">${istKette ? '2 Etappen' : fracht.frachtName} · ${fmtEuro(fracht.verguetungEuro ?? 0)}${proStunde != null ? ` · ${proStunde} €/h` : ''}</div>`;
+            html += `<div class="fi-dash-row fi-muted">${istKette ? '2 Etappen' : fracht.frachtName} · ${fmtEuro(fracht.verguetungEuro ?? 0)}</div>`;
             html += `<div class="fi-dash-row">Leerfahrt: ${Math.round(bewertung.anfahrtKm)} km</div>`;
 
             if (istKette) {
@@ -3370,8 +3365,8 @@
           trocken,
         });
         log(trocken
-          ? `<strong>Trockenlauf fertig:</strong> ${ergebnis.anzahlAngenommen} Aufträge würden gebucht · ${fmtEuro(ergebnis.summeEuro)} Vergütung (nichts wurde gebucht)`
-          : `<strong>Fertig:</strong> ${ergebnis.anzahlAngenommen} Aufträge angenommen &amp; eingeplant · ${fmtEuro(ergebnis.summeEuro)} Vergütung`, 'fi-good');
+          ? `<strong>Trockenlauf:</strong> ${ergebnis.anzahlAngenommen} Aufträge · ${fmtEuro(ergebnis.summeEuro)} (nichts gebucht)`
+          : `<strong>Fertig:</strong> ${ergebnis.anzahlAngenommen} Aufträge eingeplant · ${fmtEuro(ergebnis.summeEuro)}`, 'fi-good');
       } catch (e) {
         console.error('[FI-Helper] Automatisches Befüllen fehlgeschlagen', e);
         log(`Fehler: ${e.message}`, 'fi-bad');
@@ -3455,17 +3450,13 @@
         if (!option) { if (runde === 1) log(`Keine Frachtbörsen-Kategorie für "${label}" gefunden - übersprungen.`, 'fi-warn'); continue; }
 
         if (!marktPools.has(label)) {
-          log(`Scanne Frachtbörse "${label}" …`);
           let markt = holeMarktCache(marktCacheSchluessel(option.value));
-          if (markt && (Date.now() - markt.zeitstempel) < MARKT_CACHE_TTL_MS) {
-            log(`"${label}" aus dem Cache (vor ${Math.round((Date.now() - markt.zeitstempel) / 60000)} Min. geladen).`);
-          } else {
+          if (!(markt && (Date.now() - markt.zeitstempel) < MARKT_CACHE_TTL_MS)) {
             markt = await fetchAllOffersForBodyType(option.value, 20, () => {});
             speichereMarktCache(marktCacheSchluessel(option.value), { ...markt, zeitstempel: Date.now() });
           }
           const pool = filtereNachAufbau(markt.angebote, label).filter(a => a.kapazitaet === 'Komplettladung' && a.jobId);
           marktPools.set(label, pool);
-          log(`${pool.length} Komplettladungen für "${label}" gefunden.`);
         }
         const pool = marktPools.get(label);
         const kompatibleFleet = fleet.filter(f => f.typ === label);
@@ -3484,14 +3475,8 @@
         });
       }
 
-      fleet.filter(f => f.urlaub?.some(u => u.bis > new Date())).forEach(f => {
-        if (!urlaubGeloggt.has(f.name)) {
-          urlaubGeloggt.add(f.name);
-          f.urlaub.filter(u => u.bis > new Date()).forEach(u => log(`🌴 ${f.name}: Urlaub ${u.fahrer} ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')} (${u.status}) - es wird nur geplant, was samt Heimfahrt vorher endet.`));
-        }
-      });
       if (!zuweisungen.length) {
-        log(runde === 1 ? 'Kein Fahrzeug hat einen passenden, einplanbaren Auftrag über der Mindestgrenze.' : 'Keine weiteren einplanbaren Aufträge - alle Fahrzeuge sind befüllt.');
+        log(runde === 1 ? 'Kein Fahrzeug einplanbar.' : 'Nichts weiter einplanbar.', 'fi-muted');
         break;
       }
 
@@ -3501,7 +3486,7 @@
         const fahrzeugName = z.eintrag.fahrzeugName;
         const freiAbVorher = z.eintrag.freiAbZeit;
         try {
-          const beschreibung = `${fahrzeugName.split(' · ')[0]}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · Leerfahrt ${Math.round(bewertung.anfahrtKm)} km`;
+          const beschreibung = `${fahrzeugName.split(' · ')[0]}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2).replace('.', ',')} €/km · Leerfahrt ${Math.round(bewertung.anfahrtKm)} km`;
           if (trocken) {
             const f = fleet.find(x => String(x.status.vehicleId) === String(z.eintrag.vehicleId));
             f.status = { ...f.status, freiAbZeit: bewertung.ankunftZeit, freiAbOrt: fracht.zielOrt };
