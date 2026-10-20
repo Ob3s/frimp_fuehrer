@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.56
+// @version      0.29.57
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.56';
+  const SCRIPT_VERSION = '0.29.57';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3339,8 +3339,18 @@
       autofillBtn.textContent = '⏹ Stopp';
       loadBtn.disabled = true;
       reloadBtn.disabled = true;
-      resultsEl.innerHTML = '<div class="fi-dash-card" style="grid-column: 1 / -1;"><div class="fi-dash-card-title">⚡ Befüllen …</div><div id="fi-autofill-log"></div></div>';
+      resultsEl.innerHTML = `<div class="fi-dash-card" style="grid-column: 1 / -1;">
+        <div class="fi-dash-card-title"><span id="fi-autofill-status">⚡ Starte …</span></div>
+        <div style="height:5px; border-radius:3px; background:rgba(255,255,255,.1); overflow:hidden;"><div id="fi-autofill-bar" style="height:100%; width:2%; background:#ffd98a; transition:width .3s;"></div></div>
+        <div id="fi-autofill-log"></div></div>`;
       const logEl = document.getElementById('fi-autofill-log');
+      const statusEl = document.getElementById('fi-autofill-status');
+      const barEl = document.getElementById('fi-autofill-bar');
+      const zeigeFortschritt = ({ runde, schritt, gesamt, text }) => {
+        if (statusEl) statusEl.textContent = `⚡ Runde ${runde} · Schritt ${schritt}/${gesamt} · ${text} …`;
+        if (barEl) barEl.style.width = `${Math.max(2, Math.round((schritt / gesamt) * 100))}%`;
+        if (!autofillAbbruch) autofillBtn.textContent = `⏹ Stopp · ${schritt}/${gesamt}`;
+      };
       const log = (text, klasse = 'fi-muted') => {
         logEl.insertAdjacentHTML('beforeend', `<div class="fi-dash-row ${klasse}">${text}</div>`);
       };
@@ -3351,7 +3361,10 @@
           log,
           abgebrochen: () => autofillAbbruch,
           trocken,
+          fortschritt: zeigeFortschritt,
         });
+        if (statusEl) statusEl.textContent = '⚡ Fertig';
+        if (barEl) barEl.style.width = '100%';
         log(trocken
           ? `<strong>Trockenlauf:</strong> ${ergebnis.anzahlAngenommen} Aufträge · ${fmtEuro(ergebnis.summeEuro)}`
           : `<strong>Fertig:</strong> ${ergebnis.anzahlAngenommen} Aufträge eingeplant · ${fmtEuro(ergebnis.summeEuro)}`, 'fi-good');
@@ -3378,7 +3391,7 @@
    * den Tourenplaner, dessen Request noch nicht erfasst ist.
    * @param {{options: {value: string, label: string}[], log: Function, abgebrochen: Function, trocken?: boolean}} param
    */
-  async function befuelleFlotteAutomatisch({ options, log, abgebrochen, trocken = false }) {
+  async function befuelleFlotteAutomatisch({ options, log, abgebrochen, trocken = false, fortschritt = () => {} }) {
     const MAX_RUNDEN = 15;
     let simulierteFlotte = null;
     let anzahlAngenommen = 0;
@@ -3399,6 +3412,12 @@
 
     for (let runde = 1; runde <= MAX_RUNDEN; runde++) {
       if (abgebrochen()) { log('⏹ Vom Nutzer gestoppt.', 'fi-warn'); break; }
+
+      // Fortschritt: Schritte der laufenden Runde (Gesamtzahl wächst, sobald bekannt)
+      let schritt = 0;
+      let schritteGesamt = 1;
+      const melde = text => { schritt++; fortschritt({ runde, schritt, gesamt: schritteGesamt, text }); };
+      melde('Fahrzeugstand laden');
 
       // Trockenlauf: Fahrzeugstand nur EINMAL laden und danach lokal
       // fortschreiben (nichts wird gebucht, "frei ab" wandert virtuell).
@@ -3432,8 +3451,10 @@
       fleet = fleet.filter(f => !gesperrteFahrzeuge.has(String(f.status.vehicleId)));
       const kategorien = [...new Set(fleet.map(f => f.typ))];
       const zuweisungen = [];
+      schritteGesamt += kategorien.length + 1;
 
       for (const label of kategorien) {
+        melde(`Markt ${label}`);
         const option = options.find(o => o.label === label);
         if (!option) { if (runde === 1) log(`Keine Frachtbörsen-Kategorie für "${label}" gefunden - übersprungen.`, 'fi-warn'); continue; }
 
@@ -3463,6 +3484,8 @@
         });
       }
 
+      melde('Berechnen');
+      schritteGesamt += zuweisungen.length;
       if (!zuweisungen.length) {
         log(runde === 1 ? 'Kein Fahrzeug einplanbar.' : 'Nichts weiter einplanbar.', 'fi-muted');
         break;
@@ -3473,6 +3496,7 @@
         const { fracht, bewertung } = z.kandidat;
         const fahrzeugName = z.eintrag.fahrzeugName;
         const freiAbVorher = z.eintrag.freiAbZeit;
+        melde(`${trocken ? 'Prüfe' : 'Buche'} ${fahrzeugName.split(' · ')[0]}`);
         try {
           const beschreibung = `${fahrzeugName.split(' · ')[0]}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2).replace('.', ',')} €/km · Leerfahrt ${Math.round(bewertung.anfahrtKm)} km`;
           if (trocken) {
