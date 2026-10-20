@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.57
+// @version      0.29.58
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.57';
+  const SCRIPT_VERSION = '0.29.58';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -1479,6 +1479,25 @@
       const schaffbare = bewertungen.filter(x => x.bewertung.schaffbar !== false); // true ODER unbekannt (null)
       let kandidaten = schaffbare; // schaffbare == bewertungen (Fristen sind oben schon ausgeschlossen)
 
+      // 🏠-Fahrzeug: die Leerfahrt vom Zielort zurück in die Firma gehört zur Tour.
+      // Keine Einschränkung auf Heimziele - ein Auftrag bis Fulda + Rückfahrt wird
+      // einfach entsprechend schlechter (oder bleibt trotzdem der beste).
+      if (fahrzeug.heimkehr) {
+        const heimat = parseFirmenstandort() || 'Berlin';
+        const spezHeim = holeFahrzeugSpezifikation(fahrzeug.verbrauchsTyp ?? fahrzeug.typ);
+        const leerKostenProKm = dieselKostenProKm(false, spezHeim) + (spezHeim.mautProKm ?? MAUT_SATZ_DEFAULT);
+        kandidaten.forEach(k => {
+          const b = k.bewertung;
+          const ziel = k.fracht?.zielOrt;
+          const heimKm = !ziel || ziel === heimat ? 0 : geschaetzteStrassenKm(ziel, heimat);
+          const gesamtKm = (b.anfahrtKm ?? 0) + (k.fracht?.entfernungKm ?? 0);
+          if (heimKm == null || !(gesamtKm > 0) || b.deckungsbeitragEuro == null) return;
+          b.heimfahrtKm = heimKm;
+          b.deckungsbeitragEuro -= heimKm * leerKostenProKm;
+          b.effektivProKm = b.deckungsbeitragEuro / (gesamtKm + heimKm);
+        });
+      }
+
       kandidaten.forEach(k => { k.bewertung.kombiScore = kombinierterScore(k.bewertung); });
       kandidaten.sort((a, b) => b.bewertung.kombiScore - a.bewertung.kombiScore);
 
@@ -1499,6 +1518,7 @@
       kandidaten = kandidaten.slice(0, LOOKAHEAD_TOP);
       kandidaten.forEach(k => {
         const basis = k.bewertung;
+        if (fahrzeug.heimkehr) return; // Heimfahrt ist schon eingerechnet, kein Anschlussauftrag
         if (basis.effektivProKm == null || !(basis.gesamtStunden > 0) || !k.fracht?.zielOrt || !basis.ankunftZeit) return;
         const belegt = new Set(holeJobIdsVonKandidat(k));
         const folgeStatus = {
@@ -2751,12 +2771,48 @@
     return u ? `Urlaub ${u.fahrer} ab ${u.von.toLocaleDateString('de-DE')} (${u.status}) - Tour samt Heimfahrt wäre erst ${daheim.toLocaleString('de-DE')} zu Ende` : null;
   }
 
+  /**
+   * "Muss zurück in die Firma"-Markierung (🏠). Manuell per Klick im Tourenplan
+   * (localStorage, je Gerät) oder automatisch: Urlaub beginnt in <= 5 Tagen
+   * (Fahrer + Fahrzeug müssen dann am Firmensitz sein) bzw. HU kritisch/Zustand
+   * schlecht (Werkstatt). Erlischt von selbst, sobald das Fahrzeug am Firmensitz
+   * "frei ab" ist. Wirkung: die Bewertung rechnet die Leerfahrt vom Zielort
+   * zurück zum Firmensitz mit ein (siehe findeBesteRoutenProFahrzeug).
+   * @returns {{aktiv: boolean, grund: string|null, manuell: boolean}}
+   */
+  const HEIMKEHR_KEY = 'fi_heimkehr_v1';
+  function ladeHeimkehrMarken() {
+    try { return JSON.parse(window.localStorage.getItem(HEIMKEHR_KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function speichereHeimkehrMarken(marken) {
+    try { window.localStorage.setItem(HEIMKEHR_KEY, JSON.stringify(marken)); } catch (e) {}
+  }
+  function bestimmeHeimkehr(vehicleId, freiAbOrt, urlaubListe, details) {
+    const heimat = parseFirmenstandort() || 'Berlin';
+    const marken = ladeHeimkehrMarken();
+    const id = String(vehicleId ?? '');
+    const amFirmensitz = !!freiAbOrt && freiAbOrt === heimat;
+    if (marken[id] && amFirmensitz) { delete marken[id]; speichereHeimkehrMarken(marken); }
+    const manuell = !!marken[id] && !amFirmensitz;
+    let grund = manuell ? 'markiert' : null;
+    if (!grund && !amFirmensitz) {
+      const bald = Date.now() + 5 * 24 * 3600 * 1000;
+      if ((urlaubListe ?? []).some(u => u.bis > new Date() && u.von.getTime() <= bald)) grund = 'Urlaub steht an';
+      const schlecht = i => i && (['critical', 'expired', 'missing'].includes(i.huStatus) || i.zustandStufe === 'danger');
+      if (!grund && (schlecht(details?.verschleiss) || schlecht(details?.auflieger))) grund = 'Werkstatt/HU';
+    }
+    return { aktiv: !!grund, grund, manuell };
+  }
+
   function baueFleetMitTyp(fleetMitLive, detailsMap, fallbackLabel, urlaubNachFahrzeug = new Map()) {
     return fleetMitLive.map(f => {
       const details = f.status?.vehicleId ? detailsMap.get(String(f.status.vehicleId)) : null;
       const typ = normalisiereFahrzeugtyp(details?.frachtKategorie || details?.typ) || fallbackLabel;
+      const heim = bestimmeHeimkehr(f.status?.vehicleId, f.status?.freiAbOrt, urlaubNachFahrzeug.get(f.name), details);
       return {
         ...f,
+        heimkehr: heim.aktiv,
+        heimkehrGrund: heim.grund,
         typ,
         urlaub: urlaubNachFahrzeug.get(f.name) ?? [],
         verbrauchsTyp: normalisiereFahrzeugtyp(details?.typ) || typ,
@@ -3103,11 +3159,19 @@
           fleet.forEach(entry => {
             const vehicleId = entry.status?.vehicleId;
             const urlaubFz = (urlaubsSperren.get(entry.name) ?? []).filter(u => u.bis > new Date());
-            const symbol = urlaubFz.length ? '🌴' : '🚐';
-            const urlaubTip = urlaubFz.map(u => `Urlaub ${u.fahrer} (${u.status}): ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')}`).join('\n');
+            const heim = bestimmeHeimkehr(vehicleId, entry.status?.freiAbOrt, urlaubFz, fuhrparkDetails.get(String(vehicleId)));
+            const symbol = heim.aktiv ? '🏠' : (urlaubFz.length ? '🌴' : '🚐');
+            const urlaubTip = [
+              heim.aktiv ? `🏠 muss zurück in die Firma (${heim.grund})` : '',
+              ...urlaubFz.map(u => `🌴 Urlaub ${u.fahrer} (${u.status}): ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')}`),
+              vehicleId ? 'Klick auf das Symbol: Rückkehr zur Firma markieren/aufheben' : '',
+            ].filter(Boolean).join('\n');
+            const symbolHtml = vehicleId
+              ? `<span class="fi-heim-toggle" data-vid="${vehicleId}" data-frei-ab-ort="${(entry.status?.freiAbOrt ?? '').replace(/"/g, '')}" data-ruhe="${urlaubFz.length ? '🌴' : '🚐'}" style="cursor:pointer;">${symbol}</span>`
+              : symbol;
             const labelInhalt = vehicleId
-              ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}">${symbol} ${entry.name}</a>`
-              : `${symbol} ${entry.name}`;
+              ? `${symbolHtml} <a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}">${entry.name}</a>`
+              : `${symbolHtml} ${entry.name}`;
             const trackInhalt = baueTimelineTrackHtml(entry.status?.phasen, fensterStartMs, fensterEndeMs, markerMs);
             timelineHtml += `<div class="fi-dash-timeline-row">
               <div class="fi-dash-timeline-label"${urlaubTip ? ` data-fi-tip="${tipText(urlaubTip)}"` : ''}>${labelInhalt}</div>
@@ -3116,6 +3180,15 @@
           });
         }
         timelineEl.innerHTML = timelineHtml;
+        timelineEl.querySelectorAll('.fi-heim-toggle').forEach(el => {
+          el.addEventListener('click', () => {
+            const marken = ladeHeimkehrMarken();
+            const vid = el.dataset.vid;
+            if (marken[vid]) delete marken[vid]; else marken[vid] = 1;
+            speichereHeimkehrMarken(marken);
+            el.textContent = marken[vid] ? '🏠' : el.dataset.ruhe;
+          });
+        });
       }
     }
     await aktualisiereFlotte();
@@ -3284,7 +3357,7 @@
               html += `<div class="fi-dash-bundle-item">↳ ${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt} · ${kette.etappe1.entfernungKm} km · ${fmtEuro(kette.etappe1.verguetungEuro ?? 0)}</div>`;
               html += `<div class="fi-dash-bundle-item">↳ ${kette.etappe2.startOrt} → ${kette.etappe2.zielOrt} · ${kette.etappe2.entfernungKm} km · ${fmtEuro(kette.etappe2.verguetungEuro ?? 0)}</div>`;
             }
-            html += `<div class="fi-dash-row fi-muted">${istKette ? '2 Etappen' : fracht.frachtName} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · Leerfahrt ${Math.round(bewertung.anfahrtKm)} km</div>`;
+            html += `<div class="fi-dash-row fi-muted">${istKette ? '2 Etappen' : fracht.frachtName} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · Leerfahrt ${Math.round(bewertung.anfahrtKm)} km${bewertung.heimfahrtKm > 0 ? ` · 🏠 Heimfahrt ${Math.round(bewertung.heimfahrtKm)} km` : ''}</div>`;
 
             if (istKette) {
               html += `<button type="button" class="fi-dash-accept-btn fi-kette-btn"
@@ -3486,10 +3559,7 @@
 
       melde('Berechnen');
       schritteGesamt += zuweisungen.length;
-      if (!zuweisungen.length) {
-        log(runde === 1 ? 'Kein Fahrzeug einplanbar.' : 'Nichts weiter einplanbar.', 'fi-muted');
-        break;
-      }
+      if (!zuweisungen.length) break;
 
       for (const z of zuweisungen) {
         if (abgebrochen()) break;
@@ -3498,7 +3568,7 @@
         const freiAbVorher = z.eintrag.freiAbZeit;
         melde(`${trocken ? 'Prüfe' : 'Buche'} ${fahrzeugName.split(' · ')[0]}`);
         try {
-          const beschreibung = `${fahrzeugName.split(' · ')[0]}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2).replace('.', ',')} €/km · Leerfahrt ${Math.round(bewertung.anfahrtKm)} km`;
+          const beschreibung = `${fahrzeugName.split(' · ')[0]}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2).replace('.', ',')} €/km · Leerfahrt ${Math.round(bewertung.anfahrtKm)} km${bewertung.heimfahrtKm > 0 ? ` · 🏠 ${Math.round(bewertung.heimfahrtKm)} km` : ''}`;
           if (trocken) {
             const f = fleet.find(x => String(x.status.vehicleId) === String(z.eintrag.vehicleId));
             f.status = { ...f.status, freiAbZeit: bewertung.ankunftZeit, freiAbOrt: fracht.zielOrt };
