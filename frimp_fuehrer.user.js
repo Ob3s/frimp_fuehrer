@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.49
+// @version      0.29.50
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.49';
+  const SCRIPT_VERSION = '0.29.50';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3337,9 +3337,7 @@
               html += `<div class="fi-dash-row"><strong>${bewertung.effektivProKm !== null ? bewertung.effektivProKm.toFixed(2) + ' €/km effektiv' : '—'}</strong>${bewertung.gesamtStunden > 0 ? ` · <strong>${Math.round(bewertung.deckungsbeitragEuro / bewertung.gesamtStunden)} €/h</strong> <span class="fi-muted">(${Math.round(bewertung.gesamtStunden)} h)</span>` : ''}</div>`;
 
               if (istBundle) {
-                bundleFrachten.forEach(f => {
-                  html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${f.jobId}" data-route="${f.startOrt} → ${f.zielOrt}">✅ ${f.frachtName} annehmen</button>`;
-                });
+                html += `<div class="fi-dash-row fi-warn" style="font-size:12px;">🚫 Nicht automatisch buchbar: Teilladungen brauchen den Tourenplaner.</div>`;
               } else if (istKette) {
                 // Alles oder nichts: ein Knopf gibt es nur, wenn die GANZE Kette
                 // buchbar ist (beide Komplettladungen, Etappe 1 einplanbar UND
@@ -3363,20 +3361,15 @@
                   html += `<div class="fi-dash-row fi-warn" style="font-size:12px;">🚫 Nicht automatisch buchbar: ${grund}. Es wird nichts halb gebucht.</div>`;
                 }
               } else if (istMehrstufigeKette) {
-                html += `<div class="fi-dash-row fi-muted" style="font-size:11px;">ℹ Alle Aufträge einzeln annehmen, dann im Tourenplaner unter "${etappen[0].startOrt} → ${etappen[etappen.length - 1].zielOrt}"-Kategorie zusammen auswählen - Belade-/Entladereihenfolge in der Reihenfolge der Etappen oben setzen:</div>`;
-                etappen.forEach(etappe => {
-                  etappe.frachten.forEach(f => {
-                    html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${f.jobId}" data-route="${f.startOrt} → ${f.zielOrt}">✅ ${f.frachtName} annehmen</button>`;
-                  });
-                });
-              } else if (!bewertung.einplanbar && fracht.jobId) {
-                html += `<button type="button" class="fi-dash-accept-btn fi-accept-only-btn" data-job-id="${fracht.jobId}" data-route="${fracht.startOrt} → ${fracht.zielOrt}">✅ Nur annehmen</button>`;
+                html += `<div class="fi-dash-row fi-warn" style="font-size:12px;">🚫 Nicht automatisch buchbar: Teilladungs-Kette braucht den Tourenplaner.</div>`;
+              } else if (!bewertung.einplanbar) {
+                // kein Knopf: es gibt nur "Einplanen" (Annehmen und Einplanen in einem Schritt)
               } else if (fracht.jobId && eintrag.vehicleId && eintrag.freiAbZeit) {
                 html += `<button type="button" class="fi-dash-accept-btn fi-accept-btn"
                   data-job-id="${fracht.jobId}" data-vehicle-id="${eintrag.vehicleId}"
                   data-frei-ab="${eintrag.freiAbZeit.toISOString()}" data-beladung="${bewertung.beladungsStartZeit.toISOString()}"
                   data-route="${fracht.startOrt} → ${fracht.zielOrt}" data-fahrzeug="${eintrag.fahrzeugName}"
-                >✅ Annehmen &amp; einplanen</button>`;
+                >✅ Einplanen</button>`;
               }
             }
             html += `</div>`;
@@ -3411,13 +3404,6 @@
         return;
       }
       const trocken = document.getElementById('fi-dash-autofill-dry').checked;
-      const bestaetigt = trocken || window.confirm(
-        `ALLE Fahrzeuge automatisch befüllen?\n\n` +
-        `Das Skript nimmt fortlaufend die jeweils beste Komplettladung (ohne Mindest-€/km, nur kein Verlustgeschäft, Frist einhaltbar) ` +
-        `für jedes Fahrzeug VERBINDLICH an und plant sie ein, bis das Planungsfenster voll ist.\n\n` +
-        `Teilladungen/Ketten werden dabei NICHT berücksichtigt. Bei Nichtlieferung droht die Vertragsstrafe.`
-      );
-      if (!bestaetigt) return;
 
       autofillLaeuft = true;
       autofillAbbruch = false;
@@ -3607,11 +3593,6 @@
       btn.dataset.fiWired = '1';
       btn.addEventListener('click', async () => {
         const { jobId, vehicleId, freiAb, route, fahrzeug, beladung } = btn.dataset;
-        const bestaetigt = window.confirm(
-          `Fracht ${route} für ${fahrzeug} annehmen und einplanen?\n\n` +
-          `Das ist verbindlich - bei Nichtlieferung droht die Vertragsstrafe.`
-        );
-        if (!bestaetigt) return;
         btn.disabled = true;
         const original = btn.textContent;
         btn.textContent = 'Wird eingeplant …';
@@ -3634,12 +3615,6 @@
       btn.dataset.fiWired = '1';
       btn.addEventListener('click', async () => {
         const d = btn.dataset;
-        const bestaetigt = window.confirm(
-          `Kette für ${d.fahrzeug} annehmen und einplanen?\n\n` +
-          `1) ${d.routeA}\n2) ${d.routeB}\n\n` +
-          `Alles oder nichts: klappt eine Etappe nicht, wird alles zurückgerollt. Sonst sind beide Aufträge verbindlich (Vertragsstrafe bei Nichtlieferung).`
-        );
-        if (!bestaetigt) return;
         btn.disabled = true;
         const original = btn.textContent;
         btn.textContent = 'Wird eingeplant …';
@@ -3657,29 +3632,6 @@
       });
     });
 
-    container.querySelectorAll('.fi-accept-only-btn').forEach(btn => {
-      if (btn.dataset.fiWired) return;
-      btn.dataset.fiWired = '1';
-      btn.addEventListener('click', async () => {
-        const { jobId, route } = btn.dataset;
-        const bestaetigt = window.confirm(`Fracht ${route} annehmen?\n\nDas ist verbindlich - bei Nichtlieferung droht die Vertragsstrafe.`);
-        if (!bestaetigt) return;
-        btn.disabled = true;
-        const original = btn.textContent;
-        btn.textContent = 'Wird angenommen …';
-        try {
-          await nimmFrachtNurAn(jobId);
-          btn.textContent = '✅ Angenommen';
-          btn.style.background = '#2f6f3f';
-          btn.style.color = '#fff';
-        } catch (e) {
-          console.error('[FI-Helper] Annehmen fehlgeschlagen', e);
-          btn.textContent = original;
-          btn.disabled = false;
-          window.alert(`Fehler: ${e.message}`);
-        }
-      });
-    });
   }
 
   /**
