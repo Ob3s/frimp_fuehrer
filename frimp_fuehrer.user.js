@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.54
+// @version      0.29.55
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.54';
+  const SCRIPT_VERSION = '0.29.55';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2373,6 +2373,12 @@
         cursor: pointer;
       }
       .fi-dash-accept-btn:disabled { opacity: .55; cursor: default; }
+      /* Die Spiel-CSS erzwingt min-height:40px/Padding auf button/select/input - hier übersteuern */
+      #fi-dashboard .fi-dash-btn,
+      #fi-dashboard .fi-dash-btn-reload { min-height: 0 !important; height: 28px !important; padding: 0 10px !important; font-size: 12px !important; line-height: 1 !important; width: auto !important; }
+      #fi-dashboard .fi-dash-select { min-height: 0 !important; height: 28px !important; padding: 0 8px !important; font-size: 12px !important; }
+      #fi-dashboard .fi-dash-accept-btn { min-height: 0 !important; height: 22px !important; padding: 0 10px !important; font-size: 11.5px !important; line-height: 1 !important; width: auto !important; }
+      #fi-dashboard input[type=checkbox] { min-height: 0 !important; width: 13px !important; height: 13px !important; margin: 0 4px 0 0 !important; }
 
       /* ====== Timeline (mehrere Fahrzeuge auf einen Blick) ====== */
       .fi-dash-timeline-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; font-size: 11px; color: #cbd5e1; }
