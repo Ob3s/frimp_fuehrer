@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.63
+// @version      0.29.64
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.63';
+  const SCRIPT_VERSION = '0.29.64';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2410,12 +2410,28 @@
       .fi-aufbau .fi-dash-timeline-row { animation: fi-einflug .4s ease-out backwards; animation-delay: calc(var(--i, 0) * 70ms); }
       .fi-aufbau .fi-dash-phase-block { transform-origin: left center; animation: fi-wachs .5s ease-out backwards; animation-delay: calc(var(--i, 0) * 70ms + 150ms); }
       #fi-info-chips .fi-dash-pill { animation: fi-einflug .4s ease-out backwards; }
+      /* Fahrzeugkarte "fährt ein": Einfahrt von links, Glanz-Sweep, LKW rollt über die Kante, Zeilen und Knopf folgen, €/km zählt hoch */
+      .fi-karte { position: relative; overflow: hidden; animation: fi-einfahrt .6s cubic-bezier(.2,.9,.3,1.15) backwards; animation-delay: calc(var(--i, 0) * 120ms); }
+      @keyframes fi-einfahrt { from { opacity: 0; transform: translateX(-52px) scale(.95); } 55% { opacity: 1; } to { opacity: 1; transform: none; } }
+      .fi-karte::before { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 35%; pointer-events: none; background: linear-gradient(100deg, transparent, rgba(255,217,138,.30), transparent);
+        transform: translateX(-130%); animation: fi-glanz 1s ease-out both; animation-delay: calc(var(--i, 0) * 120ms + 380ms); }
+      @keyframes fi-glanz { to { transform: translateX(480%); } }
+      .fi-karte-lkw { position: absolute; top: 2px; left: -12%; font-size: 14px; font-style: normal; pointer-events: none; opacity: 0; transform: scaleX(-1);
+        animation: fi-lkw 1s ease-in both; animation-delay: calc(var(--i, 0) * 120ms + 200ms); }
+      @keyframes fi-lkw { 0% { left: -12%; opacity: 1; } 100% { left: 106%; opacity: 1; } }
+      .fi-karte > div:nth-child(n+2) { animation: fi-einflug .4s ease-out backwards; }
+      .fi-karte > div:nth-child(2) { animation-delay: calc(var(--i, 0) * 120ms + 420ms); }
+      .fi-karte > div:nth-child(3) { animation-delay: calc(var(--i, 0) * 120ms + 540ms); }
+      .fi-karte > div:nth-child(4) { animation-delay: calc(var(--i, 0) * 120ms + 660ms); }
+      .fi-karte > div:nth-child(n+5) { animation-delay: calc(var(--i, 0) * 120ms + 780ms); }
+      .fi-karte > button { animation: fi-knopf .5s cubic-bezier(.2,.9,.3,1.4) backwards; animation-delay: calc(var(--i, 0) * 120ms + 900ms); }
+      @keyframes fi-knopf { from { opacity: 0; transform: scale(.7); } to { opacity: 1; transform: none; } }
       .fi-wartet, .fi-wartet * { animation-play-state: paused !important; }
       .fi-skel { position: absolute; inset: 3px 0; border-radius: 4px; background: rgba(255,255,255,.05); overflow: hidden; }
       .fi-skel::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 25%; background: linear-gradient(90deg, transparent, rgba(255,217,138,.28), transparent); transform: translateX(-100%); animation: fi-shimmer 1.2s linear infinite; }
       @keyframes fi-shimmer { to { transform: translateX(400%); } }
       .fi-zeile-neu .fi-dash-phase-block { transform-origin: left center; animation: fi-wachs .5s ease-out backwards; }
-      @media (prefers-reduced-motion: reduce) { .fi-scan *, .fi-skel::after, .fi-zeile-neu *, .fi-einflug, .fi-aufbau *, #fi-info-chips * { animation: none !important; } }
+      @media (prefers-reduced-motion: reduce) { .fi-karte, .fi-karte *, .fi-karte::before, .fi-scan *, .fi-skel::after, .fi-zeile-neu *, .fi-einflug, .fi-aufbau *, #fi-info-chips * { animation: none !important; } }
 
       /* ====== Timeline (mehrere Fahrzeuge auf einen Blick) ====== */
       .fi-dash-timeline-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; font-size: 11px; color: #cbd5e1; }
@@ -3263,6 +3279,21 @@
     const loadBtn = document.getElementById('fi-dash-load-btn');
     const reloadBtn = document.getElementById('fi-dash-reload-btn');
     const resultsEl = document.getElementById('fi-dash-results');
+    resultsEl.addEventListener('animationstart', ev => {
+      const karte = ev.target;
+      if (ev.animationName !== 'fi-einfahrt' || !karte.classList?.contains('fi-karte')) return;
+      if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+      const zahl = karte.querySelector('.fi-eurkm');
+      const ziel = parseFloat(zahl?.dataset.ziel);
+      if (!zahl || !Number.isFinite(ziel)) return;
+      const t0 = performance.now();
+      const schritt = jetzt => {
+        const p = Math.min(1, (jetzt - t0) / 900);
+        zahl.textContent = `${(ziel * (1 - Math.pow(1 - p, 3))).toFixed(2).replace('.', ',')} €/km`;
+        if (p < 1) requestAnimationFrame(schritt);
+      };
+      requestAnimationFrame(schritt);
+    });
     // "Zurück zur Firma"-Filter ist entfallen (Rückruf per Knopf im Tourenplan, siehe rufeFahrzeugZurueck)
     const onlyReturnCb = { checked: false };
     const returnVehicleSelect = { value: '' };
@@ -3388,7 +3419,7 @@
               : `🚐 ${eintrag.fahrzeugName}`;
             const { fracht, bewertung, istKette, kette } = eintrag.beste;
             const eurProKm = bewertung.effektivProKm != null ? bewertung.effektivProKm.toFixed(2).replace('.', ',') : '–';
-            html += `<div class="fi-dash-card fi-einflug" style="--i:${kartenIndex}"><div class="fi-dash-card-title"><span>${titel}</span><span style="font-size:17px; color:#ffd98a;">${eurProKm} €/km</span></div>`;
+            html += `<div class="fi-dash-card fi-karte" style="--i:${kartenIndex}"><div class="fi-dash-card-title"><span>${titel}</span><span class="fi-eurkm" data-ziel="${bewertung.effektivProKm ?? ''}" style="font-size:17px; color:#ffd98a;">${eurProKm} €/km</span></div>`;
             html += `<div class="fi-dash-row"><strong>${fracht.startOrt} → ${fracht.zielOrt}</strong> (${fracht.entfernungKm ?? '?'} km)</div>`;
             if (istKette) {
               html += `<div class="fi-dash-bundle-item">↳ ${kette.etappe1.startOrt} → ${kette.etappe1.zielOrt} · ${kette.etappe1.entfernungKm} km · ${fmtEuro(kette.etappe1.verguetungEuro ?? 0)}</div>`;
@@ -3410,7 +3441,7 @@
                 data-route="${fracht.startOrt} → ${fracht.zielOrt}" data-fahrzeug="${eintrag.fahrzeugName}"
               >Einplanen</button>`;
             }
-            html += `</div>`;
+            html += `<i class="fi-karte-lkw">🚚</i></div>`;
           });
         }
 
