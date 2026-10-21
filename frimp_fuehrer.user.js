@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.62
+// @version      0.29.63
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.62';
+  const SCRIPT_VERSION = '0.29.63';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -386,7 +386,7 @@
    * Verhalten schlechter als vorher, nur potenziell kein Fetch gespart.
    * @returns {Promise<{name: string, status: VehicleStatus|null}[]>}
    */
-  async function fetchFleetStatus() {
+  async function fetchFleetStatus(onListe = null, onFahrzeug = null) {
     const onDispatchPage = /\/game\/dispatch\.php/.test(location.pathname);
     let vehicles;
     let vorabStatus = null;
@@ -413,16 +413,19 @@
     }
 
     if (!vehicles.length) return [];
+    onListe?.(vehicles.map(v => v.name));
 
     const results = await Promise.all(
       vehicles.map(v => {
+        // Jedes Fahrzeug meldet sich einzeln, sobald sein Plan da ist (Live-Aufbau der Anzeige)
+        const melde = promise => promise.then(r => { try { onFahrzeug?.(v.name, r); } catch (e) { /* Anzeige darf Laden nie stören */ } return r; });
         // "Schon geladen, kein Fetch nötig" gilt für zwei Fälle: wir sind
         // wirklich auf dispatch.php UND das Fahrzeug ist dort ausgewählt,
         // ODER wir haben den Status schon aus dem Vorab-Fetch oben (die ID
         // passt zum vom Server default ausgewählten Fahrzeug).
-        if (onDispatchPage && v.istAusgewaehlt) return Promise.resolve(parseCurrentVehicleStatus());
-        if (vorabStatus && String(vorabStatus.vehicleId) === String(v.id)) return Promise.resolve(vorabStatus);
-        return fetchVehicleStatus(v.id, v.name);
+        if (onDispatchPage && v.istAusgewaehlt) return melde(Promise.resolve(parseCurrentVehicleStatus()));
+        if (vorabStatus && String(vorabStatus.vehicleId) === String(v.id)) return melde(Promise.resolve(vorabStatus));
+        return melde(fetchVehicleStatus(v.id, v.name));
       })
     );
 
@@ -2407,7 +2410,12 @@
       .fi-aufbau .fi-dash-timeline-row { animation: fi-einflug .4s ease-out backwards; animation-delay: calc(var(--i, 0) * 70ms); }
       .fi-aufbau .fi-dash-phase-block { transform-origin: left center; animation: fi-wachs .5s ease-out backwards; animation-delay: calc(var(--i, 0) * 70ms + 150ms); }
       #fi-info-chips .fi-dash-pill { animation: fi-einflug .4s ease-out backwards; }
-      @media (prefers-reduced-motion: reduce) { .fi-scan *, .fi-einflug, .fi-aufbau *, #fi-info-chips * { animation: none !important; } }
+      .fi-wartet, .fi-wartet * { animation-play-state: paused !important; }
+      .fi-skel { position: absolute; inset: 3px 0; border-radius: 4px; background: rgba(255,255,255,.05); overflow: hidden; }
+      .fi-skel::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 25%; background: linear-gradient(90deg, transparent, rgba(255,217,138,.28), transparent); transform: translateX(-100%); animation: fi-shimmer 1.2s linear infinite; }
+      @keyframes fi-shimmer { to { transform: translateX(400%); } }
+      .fi-zeile-neu .fi-dash-phase-block { transform-origin: left center; animation: fi-wachs .5s ease-out backwards; }
+      @media (prefers-reduced-motion: reduce) { .fi-scan *, .fi-skel::after, .fi-zeile-neu *, .fi-einflug, .fi-aufbau *, #fi-info-chips * { animation: none !important; } }
 
       /* ====== Timeline (mehrere Fahrzeuge auf einen Blick) ====== */
       .fi-dash-timeline-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; font-size: 11px; color: #cbd5e1; }
@@ -2633,6 +2641,16 @@
    * Baut die Kopfzeile mit Uhrzeit-Beschriftung über allen Fahrzeug-Spuren
    * (an derselben Spaltenbreite ausgerichtet wie die Timeline-Zeilen selbst).
    */
+  function baueTimelineLegendeHtml() {
+    return `<div class="fi-dash-timeline-legend">
+          <span><i style="background:#5b9bd5;"></i>Leerfahrt</span>
+          <span><i style="background:#d4a94a;"></i>Laden / Entladen</span>
+          <span><i style="background:#4caf7d;"></i>Fahrt beladen</span>
+          <span><i style="background:#c1554a;"></i>Pause / Schichtpause</span>
+          <span><i style="background:#ff5c5c;"></i>Nächster Planungsbedarf</span>
+        </div>`;
+  }
+
   function baueTimelineKopfzeileHtml(fensterStartMs, fensterEndeMs, markerMs = null, markerLabel = '') {
     const ticks = baueZeitAchsenTicks(fensterStartMs, fensterEndeMs);
     let tickHtml = ticks.map(t => `<div class="fi-dash-timeline-tick${t.istMitternacht ? ' is-day' : ''}" style="left:${t.pct.toFixed(2)}%">${t.label}</div>`).join('');
@@ -3026,7 +3044,28 @@
     async function aktualisiereFlotte() {
       const infoEl = document.getElementById('fi-info-chips');
       if (!infoEl) return;
-      const [fleet, fuhrparkDetails] = await Promise.all([fetchFleetStatus(), fetchFuhrparkDetails()]);
+      // Beim ersten Aufbau: Zeilen erscheinen sofort als Platzhalter und füllen sich, sobald
+      // der Plan des jeweiligen Fahrzeugs eintrifft - sichtbar erst, wenn der Bereich im Bild ist.
+      const timelineVorab = document.getElementById('fi-dash-timeline');
+      const erstesMal = !!timelineVorab && !timelineVorab.dataset.vorab;
+      const vorabStart = Date.now();
+      const vorabEnde = vorabStart + 48 * 3600 * 1000;
+      const onListe = namen => {
+        if (!erstesMal) return;
+        timelineVorab.dataset.vorab = '1';
+        if (!timelineVorab.dataset.gesehen) startWennSichtbar(timelineVorab);
+        timelineVorab.classList.toggle('fi-aufbau', !timelineVorab.dataset.gesehen);
+        timelineVorab.innerHTML = baueTimelineLegendeHtml() + baueTimelineKopfzeileHtml(vorabStart, vorabEnde, null, '') + namen.map((n, i) =>
+          `<div class="fi-dash-timeline-row" style="--i:${i}" data-fz="${n.replace(/"/g, '&quot;')}"><div class="fi-dash-timeline-label"><span class="fi-lbl-name">🚐 ${n}</span></div><div class="fi-dash-timeline-track"><i class="fi-skel"></i></div></div>`).join('');
+      };
+      const onFahrzeug = (name, status) => {
+        if (!erstesMal) return;
+        const zeile = [...timelineVorab.querySelectorAll('.fi-dash-timeline-row')].find(z => z.dataset.fz === name);
+        if (!zeile || !status) return;
+        zeile.querySelector('.fi-dash-timeline-track').innerHTML = baueTimelineTrackHtml(status.phasen, vorabStart, vorabEnde, null);
+        zeile.classList.add('fi-zeile-neu');
+      };
+      const [fleet, fuhrparkDetails] = await Promise.all([fetchFleetStatus(onListe, onFahrzeug), fetchFuhrparkDetails()]);
       flotteFuerAuswahl = fleet;
 
       // Diagnose-Log (siehe Chat): zeigt in der Konsole (F12), ob der neue
@@ -3114,6 +3153,8 @@
       // Die einzelnen Fahrzeugkarten sind auf Wunsch entfallen (die Timeline zeigt
       // alles); übrig bleibt die Warnung für Fahrzeuge ohne Fahrer plus die
       // Verschleiß/HU-Warnung oben.
+      const kopfEl = infoEl.parentElement; // infoEl selbst ist display:contents (hat keine Box -> nicht beobachtbar)
+      if (kopfEl && !kopfEl.dataset.gesehen) startWennSichtbar(kopfEl);
       infoEl.innerHTML = html;
 
       // --- Timeline: alle Fahrzeuge auf einen Blick (wie der spieleigene
@@ -3148,13 +3189,7 @@
           ? `${naechsterPlanungsbedarf.zeit.toLocaleString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} · ${naechsterPlanungsbedarf.name}`
           : '';
 
-        let timelineHtml = `<div class="fi-dash-timeline-legend">
-          <span><i style="background:#5b9bd5;"></i>Leerfahrt</span>
-          <span><i style="background:#d4a94a;"></i>Laden / Entladen</span>
-          <span><i style="background:#4caf7d;"></i>Fahrt beladen</span>
-          <span><i style="background:#c1554a;"></i>Pause / Schichtpause</span>
-          <span><i style="background:#ff5c5c;"></i>Nächster Planungsbedarf</span>
-        </div>`;
+        let timelineHtml = baueTimelineLegendeHtml();
 
         if (!fleet.length) {
           timelineHtml += '<div class="fi-empty">Keine Fahrzeuge gefunden.</div>';
@@ -3185,9 +3220,9 @@
             </div>`;
           });
         }
-        // Aufbau-Animation nur beim ersten Zeichnen (spätere Aktualisierungen flackern nicht)
-        timelineEl.classList.toggle('fi-aufbau', !timelineEl.dataset.gezeigt);
-        timelineEl.dataset.gezeigt = '1';
+        // Aufbau-Animation nur, solange der Bereich noch nie im Bild war (danach kein Flackern)
+        if (!timelineEl.dataset.gesehen) startWennSichtbar(timelineEl);
+        timelineEl.classList.toggle('fi-aufbau', !timelineEl.dataset.gesehen);
         timelineEl.innerHTML = timelineHtml;
         timelineEl.querySelectorAll('.fi-rueckruf-btn').forEach(btn => {
           btn.addEventListener('click', async () => {
@@ -3251,6 +3286,9 @@
       const kategorieVorab = bodyTypeSelect.selectedOptions[0]?.textContent ?? '';
       const konsole = baueScanKonsole(resultsEl, `Frachtbörse · ${kategorieVorab}`);
       konsole.stufe('Starte …');
+      delete resultsEl.dataset.gesehen;
+      startWennSichtbar(resultsEl);
+      resultsEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
       // Protokoll für die Diagnose-Anzeige zurücksetzen - sammelt ab hier
       // jeden zusätzlichen Seitenaufruf dieses Laufs (siehe protokolliereAbruf).
@@ -3290,16 +3328,11 @@
           speichereMarktCache(cacheKey, { ...marktErgebnis, zeitstempel: Date.now() });
         }
 
-        konsole.stufe('Flotte & Fahrerzeiten laden …');
         konsole.fortschritt(0.62);
-        const fleetRoh = await fetchFleetStatus();
         const { angebote, gescannteSeiten, gesamtSeiten } = marktErgebnis;
         const kategorieLabel = options.find(o => o.value === bodyType)?.label ?? bodyType;
 
-        const [fleetMitLive, detailsMap] = await Promise.all([
-          Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null }))),
-          fetchFuhrparkDetails(erzwingeNeuladen),
-        ]);
+        const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, erzwingeNeuladen);
         const fleet = baueFleetMitTyp(fleetMitLive, detailsMap, kategorieLabel, await fetchUrlaubsSperren());
 
         // WICHTIG: passende bleibt bewusst UNGEFILTERT nach Zielort - die
@@ -3419,6 +3452,9 @@
       resultsEl.innerHTML = '<div id="fi-autofill-konsole" style="grid-column: 1 / -1;"></div><div id="fi-autofill-log" style="grid-column: 1 / -1;"></div>';
       const logEl = document.getElementById('fi-autofill-log');
       const konsole = baueScanKonsole(document.getElementById('fi-autofill-konsole'), 'Alle Fahrzeuge befüllen');
+      delete resultsEl.dataset.gesehen;
+      startWennSichtbar(resultsEl);
+      resultsEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       const zeigeFortschritt = ({ runde, schritt, gesamt, text }) => {
         konsole.stufe(`Runde ${runde} · Schritt ${schritt}/${gesamt} · ${text} …`);
         konsole.fortschritt(schritt / gesamt);
@@ -3454,6 +3490,47 @@
         await aktualisiereFlotte();
       }
     });
+  }
+
+  /**
+   * Animationen starten erst, wenn das Element wirklich im Bild ist: bis dahin trägt es
+   * `fi-wartet` (CSS pausiert alle Animationen darin, Elemente stehen im Startzustand).
+   * Sobald es zu sehen ist, wird die Klasse entfernt und `data-gesehen` gesetzt.
+   */
+  const sichtbarkeitsBeobachter = (typeof IntersectionObserver !== 'undefined')
+    ? new IntersectionObserver(eintraege => {
+        eintraege.forEach(e => {
+          if (!e.isIntersecting) return;
+          e.target.classList.remove('fi-wartet');
+          e.target.dataset.gesehen = '1';
+          sichtbarkeitsBeobachter.unobserve(e.target);
+        });
+      }, { threshold: 0.1 })
+    : null;
+  function startWennSichtbar(el) {
+    if (!el || !sichtbarkeitsBeobachter) { if (el) el.dataset.gesehen = '1'; return; }
+    el.classList.add('fi-wartet');
+    sichtbarkeitsBeobachter.observe(el);
+  }
+
+  /** Flotte laden und dabei live in der Konsole zeigen, was eintrifft (Pläne, Fahrerzeiten, Fuhrpark). */
+  async function ladeFlotteMitLive(konsole, erzwingeNeuladen) {
+    const kurz = n => n.split(' · ')[0];
+    konsole?.stufe('Fahrzeugpläne laden …');
+    const fleetRoh = await fetchFleetStatus(
+      namen => konsole?.fahrzeuge(namen.map(kurz)),
+      name => { konsole?.fahrzeugStatus(kurz(name), 'rechnet', 'Plan ✓'); konsole?.fund(`📡 ${kurz(name)} · Plan geladen`); },
+    );
+    konsole?.stufe('Fahrerzeiten & Fuhrpark laden …');
+    const [fleetMitLive, detailsMap] = await Promise.all([
+      Promise.all(fleetRoh.map(async f => {
+        const live = f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null;
+        konsole?.fahrzeugStatus(kurz(f.name), 'fertig', live ? 'Fahrerzeit ✓' : 'Plan ✓');
+        return { ...f, live };
+      })),
+      fetchFuhrparkDetails(erzwingeNeuladen),
+    ]);
+    return { fleetMitLive, detailsMap };
   }
 
   /**
@@ -3613,11 +3690,7 @@
       if (trocken && simulierteFlotte) {
         fleet = simulierteFlotte;
       } else {
-        const fleetRoh = await fetchFleetStatus();
-        const [fleetMitLive, detailsMap] = await Promise.all([
-          Promise.all(fleetRoh.map(async f => ({ ...f, live: f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null }))),
-          fetchFuhrparkDetails(true),
-        ]);
+        const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, true);
         fleet = baueFleetMitTyp(fleetMitLive, detailsMap, null, await fetchUrlaubsSperren())
           .filter(f => f.typ && f.status?.vehicleId && f.status?.freiAbOrt && f.status?.freiAbZeit);
         if (trocken) simulierteFlotte = fleet;
