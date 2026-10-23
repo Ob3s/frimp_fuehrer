@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.68
+// @version      0.29.69
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.68';
+  const SCRIPT_VERSION = '0.29.69';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3069,8 +3069,9 @@
       });
       const tip = t => t.replace(/"/g, '&quot;');
       let html = '';
-      [...tage.entries()].slice(0, 2).forEach(([k, e], i) => {
+      [...tage.entries()].forEach(([k, e], i) => {
         const inTagen = Math.max(0, Math.ceil((e.datum.getTime() - jetzt) / 86400000));
+        if (inTagen > 7) return; // nur 7 Tage vorher anzeigen
         const zeilen = e.raten.map(r => `Rate #${r.nr} · ${fmtEuro(r.betrag)} (Tilgung ${fmtEuro(r.tilgung)} · Zinsen ${fmtEuro(r.zinsen)}) · ${r.faellig.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`);
         if (i === 0 && z.restschuld != null) zeilen.push(`Restschuld gesamt: ${fmtEuro(z.restschuld)}`);
         html += `<a class="fi-dash-pill" href="/game/bank.php" style="text-decoration:none;" data-fi-tip="${tip(zeilen.join('\n'))}">💳 ${k} · ${eur(e.summe)} <span style="color:#9aa5b8; font-weight:600;">in ${inTagen} T</span></a>`;
@@ -3090,11 +3091,11 @@
           z.letztesGehalt ? `Zuletzt ${z.letztesGehalt.datum.toLocaleDateString('de-DE')}: ${fmtEuro(z.letztesGehalt.betrag)}.` : '',
           `Aktuelle Monatsgehälter: ${fmtEuro(z.gehalt)} (die Abrechnung kann anteilig abweichen, z. B. bei Neueinstellungen).`,
         ].filter(Boolean).join('\n');
-        html += `<a class="fi-dash-pill" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tip(tipText)}">👥 ${kand.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })} · ~${eur(z.gehalt)} <span style="color:#9aa5b8; font-weight:600;">in ${inTagen} T</span></a>`;
+        if (inTagen <= 7) html += `<a class="fi-dash-pill" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tip(tipText)}">👥 ${kand.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })} · ~${eur(z.gehalt)} <span style="color:#9aa5b8; font-weight:600;">in ${inTagen} T</span></a>`;
       }
-      // Warnung: Kontostand deckt die Raten der nächsten 14 Tage nicht
-      const faellig14 = z.raten.filter(r => r.faellig.getTime() > jetzt && r.faellig.getTime() < jetzt + 14 * 86400000).reduce((a, r) => a + r.betrag, 0)
-        + (gehaltTermin && gehaltTermin.getTime() < jetzt + 14 * 86400000 ? z.gehalt : 0);
+      // Warnung: Kontostand deckt die Zahlungen der nächsten 7 Tage nicht
+      const faellig14 = z.raten.filter(r => r.faellig.getTime() > jetzt && r.faellig.getTime() < jetzt + 7 * 86400000).reduce((a, r) => a + r.betrag, 0)
+        + (gehaltTermin && gehaltTermin.getTime() < jetzt + 7 * 86400000 ? z.gehalt : 0);
       if (z.konto != null && faellig14 > z.konto) {
         html += `<span class="fi-dash-pill is-warn">⚠ Kontostand reicht nicht für die Raten (${eur(faellig14)})</span>`;
       }
@@ -3160,27 +3161,37 @@
       // Hauptuntersuchung + Verschleiß gegen die echten Mindestwerte der Prüfstelle:
       // HU-Chip nur bei Fälligkeit in <= 60 Tagen (orange), <= 30 Tage / überfällig (rot);
       // Verschleiß-Chip nur wenn ein Bauteil <= 10 Prozentpunkte über dem Mindestwert liegt (<= 0: defekt).
-      const pruef = await fetchPruefstand();
+      const [pruef, kmProTag] = await Promise.all([fetchPruefstand(), fetchKmProTag()]);
       if (pruef?.length) {
         const jetztMs = Date.now();
+        const maxKmTag = kmProTag && kmProTag.size ? Math.max(...kmProTag.values()) : 1200;
         const eintraege = pruef.map(e => {
-          const knapp = e.teile.reduce((m, t) => (t.wert - t.min < m.reserve ? { teil: t.name, reserve: t.wert - t.min } : m), { teil: '', reserve: Infinity });
           const tage = e.huDatum ? Math.ceil((e.huDatum.getTime() - jetztMs) / 86400000) : null;
-          return { ...e, knapp, tage };
+          // km/Tag: gemessen (7-Tage-Schnitt), Auflieger/unbekannt = schnellstes Fahrzeug; +25 % Sicherheit
+          const kmTag = (kmProTag?.get(e.name) ?? maxKmTag) * 1.25;
+          // Hochrechnung je Bauteil: Tage bis zum Mindestwert = Reserve (pp) / (pp pro km * km pro Tag)
+          const teile = e.teile.map(t => {
+            const rate = (VERSCHLEISS_PP_PRO_1000KM[t.name] ?? 0.55) / 1000; // pp je km
+            const reserve = t.wert - t.min;
+            return { name: t.name, reserve, tageBisGrenze: kmTag > 0 ? reserve / (rate * kmTag) : Infinity };
+          });
+          const knapp = teile.reduce((m, t) => (t.tageBisGrenze < m.tageBisGrenze ? t : m), { tageBisGrenze: Infinity, reserve: Infinity, name: '' });
+          return { ...e, tage, knapp };
         });
-        // Nur anzeigen, wenn eine HU in <= 60 Tagen ansteht (oder überfällig ist)
-        const nachHU = eintraege.filter(e => e.tage != null && e.tage <= 60).sort((x, y) => x.tage - y.tage);
+        // Hauptuntersuchung: nur 7 Tage vorher (oder überfällig)
+        const nachHU = eintraege.filter(e => e.tage != null && e.tage <= 7).sort((x, y) => x.tage - y.tage);
         if (nachHU.length) {
           const n = nachHU[0];
-          const stufe = n.tage <= 30 ? 'is-negative' : 'is-warn';
-          const zeilen = nachHU.map(e => `${e.name} · HU ${e.huDatum.toLocaleDateString('de-DE')} (${e.tage < 0 ? `${-e.tage} T überfällig` : `in ${e.tage} T`}) · knappstes Bauteil: ${e.knapp.teil} +${e.knapp.reserve.toFixed(1).replace('.', ',')} pp`);
-          html += `<a class="fi-dash-pill ${stufe}" href="/game/inspection-station.php" style="text-decoration:none;" data-fi-tip="${tipText(`Hauptuntersuchung alle 12 Monate (1.250 €), nur am Firmensitz ohne Touren.\n` + zeilen.join('\n'))}">🔧 HU ${n.huDatum.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })} · ${n.name.split(' ')[0]} ${n.name.split(' ')[1] ?? ''} <span style="font-weight:600;">in ${n.tage} T</span></a>`;
+          const zeilen = nachHU.map(e => `${e.name} · HU ${e.huDatum.toLocaleDateString('de-DE')} (${e.tage < 0 ? `${-e.tage} T überfällig` : `in ${e.tage} T`})`);
+          html += `<a class="fi-dash-pill ${n.tage <= 2 ? 'is-negative' : 'is-warn'}" href="/game/inspection-station.php" style="text-decoration:none;" data-fi-tip="${tipText(`Hauptuntersuchung (1.250 €) - nur am Firmensitz ohne Touren.\n` + zeilen.join('\n'))}">🔧 HU ${n.name.split(' ').slice(0, 2).join(' ')} in ${n.tage} T${nachHU.length > 1 ? ` (+${nachHU.length - 1})` : ''}</a>`;
         }
-        const knappe = eintraege.filter(e => e.knapp.reserve <= 10).sort((x, y) => x.knapp.reserve - y.knapp.reserve);
+        // Verschleiß: nur wenn ein Bauteil in <= 7 Tagen den Mindestwert erreicht (oder schon darunter ist)
+        const knappe = eintraege.filter(e => e.knapp.tageBisGrenze <= 7).sort((x, y) => x.knapp.tageBisGrenze - y.knapp.tageBisGrenze);
         if (knappe.length) {
           const defekt = knappe.some(e => e.knapp.reserve <= 0);
-          const zeilen = knappe.map(e => `${e.name}: ${e.knapp.teil} ${e.knapp.reserve <= 0 ? 'DEFEKT (unter Mindestwert)' : `nur +${e.knapp.reserve.toFixed(1).replace('.', ',')} pp über dem Mindestwert`}`);
-          html += `<a class="fi-dash-pill ${defekt ? 'is-negative' : 'is-warn'}" href="/game/workshop.php" style="text-decoration:none;" data-fi-tip="${tipText(zeilen.join('\n'))}">⚠ Verschleiß ${knappe.length}× · ${knappe[0].name} ${knappe[0].knapp.teil}</a>`;
+          const zeilen = knappe.map(e => `${e.name}: ${e.knapp.name} ${e.knapp.reserve <= 0 ? 'DEFEKT (unter Mindestwert)' : `+${e.knapp.reserve.toFixed(1).replace('.', ',')} pp Reserve, Grenze in ca. ${Math.max(1, Math.round(e.knapp.tageBisGrenze))} T`}`);
+          const k0 = knappe[0];
+          html += `<a class="fi-dash-pill ${defekt ? 'is-negative' : 'is-warn'}" href="/game/workshop.php" style="text-decoration:none;" data-fi-tip="${tipText(zeilen.join('\n'))}">⚠ ${k0.name.split(' ').slice(0, 2).join(' ')} ${k0.knapp.name}${k0.knapp.reserve <= 0 ? ' defekt' : ` in ~${Math.max(1, Math.round(k0.knapp.tageBisGrenze))} T`}${knappe.length > 1 ? ` (+${knappe.length - 1})` : ''}</a>`;
         }
       }
 
@@ -3629,6 +3640,50 @@
       return daten;
     } catch (e) {
       console.warn('[FI-Helper] Prüfstelle konnte nicht geladen werden', e);
+      return null;
+    }
+  }
+
+  /**
+   * Verschleiß pro 1000 km in Prozentpunkten - aus 120 abgeschlossenen Touren (Tourmeldungen im
+   * Posteingang: "Verschleiss: Reifen 74,85 % -> 74,75 %") gemessen, für Zugmaschine, Solo-LKW
+   * und Kleintransporter identisch, linear in den gefahrenen km (Leer- und Lastfahrt gleich).
+   */
+  const VERSCHLEISS_PP_PRO_1000KM = { Reifen: 0.55, Bremsen: 0.48, Kupplung: 0.40, Motor: 0.20, Fahrgestell: 0.10 };
+
+  /**
+   * Gefahrene km pro Tag je Fahrzeug (Schnitt der letzten 7 Tage) aus den Tourmeldungen
+   * (inbox.php?filter=dispatch, neueste zuerst). 20 Min. gecached.
+   * @returns {Promise<Map<string, number>|null>} Fahrzeugname ("GE 05") -> km/Tag
+   */
+  let kmProTagCache = null;
+  async function fetchKmProTag() {
+    if (kmProTagCache && Date.now() - kmProTagCache.zeit < 20 * 60 * 1000) return kmProTagCache.daten;
+    try {
+      const grenze = Date.now() - 7 * 86400000;
+      const summe = new Map();
+      let weiter = true;
+      for (let seite = 1; seite <= 8 && weiter; seite++) {
+        const res = await fetch(`/game/inbox.php?filter=dispatch&page=${seite}`, { credentials: 'same-origin', cache: 'no-store' });
+        if (!res.ok) break;
+        const karten = [...safeParseHtml(await res.text()).querySelectorAll('article.message-card')];
+        if (!karten.length) break;
+        karten.forEach(a => {
+          const t = a.textContent.replace(/\s+/g, ' ');
+          const dm = /Empfangen am (\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2})/.exec(t);
+          if (!dm) return;
+          if (new Date(+dm[3], +dm[2] - 1, +dm[1], +dm[4], +dm[5]).getTime() < grenze) { weiter = false; return; }
+          if (!/Tour abgeschlossen/.test(t)) return;
+          const fz = /Gefahren mit:\s*(\S+ \d+)\s*·/.exec(t);
+          const km = /Gesamtstrecke:\s*(\d+) km/.exec(t);
+          if (fz && km) summe.set(fz[1], (summe.get(fz[1]) ?? 0) + +km[1]);
+        });
+      }
+      const daten = new Map([...summe.entries()].map(([k, v]) => [k, v / 7]));
+      kmProTagCache = { zeit: Date.now(), daten };
+      return daten;
+    } catch (e) {
+      console.warn('[FI-Helper] km/Tag konnten nicht ermittelt werden', e);
       return null;
     }
   }
