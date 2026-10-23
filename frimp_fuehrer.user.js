@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.80
+// @version      0.29.81
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.80';
+  const SCRIPT_VERSION = '0.29.81';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2646,9 +2646,12 @@
     tip.id = 'fi-tooltip-box';
     document.body.appendChild(tip);
 
-    document.addEventListener('mouseover', (ev) => {
-      const el = ev.target.closest('[data-fi-tip]');
-      if (!el) return;
+    // Touch-Geräte (kein Hover): Tippen zeigt den Tooltip, ein zweites Tippen auf Links/Knöpfe führt sie aus,
+    // Tippen daneben schließt ihn. Maus: wie bisher per Hover.
+    const ohneHover = () => !!window.matchMedia?.('(hover: none)').matches;
+    let aktivEl = null;
+
+    const zeige = el => {
       const text = el.getAttribute('data-fi-tip');
       if (!text) return;
       tip.textContent = text;
@@ -2658,16 +2661,41 @@
       // Grob am linken/rechten Bildschirmrand abfangen, damit die Box nicht abgeschnitten wird
       left = Math.max(160, Math.min(window.innerWidth - 160, left));
       tip.style.left = `${left}px`;
-      tip.style.top = `${Math.max(8, rect.top - 8)}px`;
-      tip.style.transform = 'translate(-50%, -100%)';
+      // oberhalb des Elements; passt es dort nicht hin (Seitenrand oben), darunter
+      if (rect.top - 8 - tip.offsetHeight < 4) {
+        tip.style.top = `${rect.bottom + 8}px`;
+        tip.style.transform = 'translate(-50%, 0)';
+      } else {
+        tip.style.top = `${rect.top - 8}px`;
+        tip.style.transform = 'translate(-50%, -100%)';
+      }
+      aktivEl = el;
+    };
+    const verstecke = () => { tip.style.display = 'none'; aktivEl = null; };
+
+    document.addEventListener('mouseover', (ev) => {
+      if (ohneHover()) return; // Touch löst synthetische mouseover aus - dort zählt nur das Tippen
+      const el = ev.target.closest('[data-fi-tip]');
+      if (el) zeige(el);
     });
 
     document.addEventListener('mouseout', (ev) => {
+      if (ohneHover()) return;
       const el = ev.target.closest('[data-fi-tip]');
       if (!el) return;
       if (el.contains(ev.relatedTarget)) return; // nur ausblenden, wenn wirklich verlassen
-      tip.style.display = 'none';
+      verstecke();
     });
+
+    document.addEventListener('click', (ev) => {
+      if (!ohneHover()) return;
+      const el = ev.target.closest('[data-fi-tip]');
+      if (!el) { if (aktivEl) verstecke(); return; }
+      if (aktivEl === el) { verstecke(); return; } // zweites Tippen: Aktion/Link ausführen lassen
+      // erstes Tippen: nur Info zeigen, Link/Knopf noch nicht auslösen
+      if (el.closest('a, button')) { ev.preventDefault(); ev.stopImmediatePropagation(); }
+      zeige(el);
+    }, true);
   }
 
   /**
