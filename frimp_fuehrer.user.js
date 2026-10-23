@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.86
+// @version      0.29.87
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.86';
+  const SCRIPT_VERSION = '0.29.87';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -5290,7 +5290,7 @@
     { kat: 'Profil & Auftreten', icon: '🛡️', name: 'Markenauftritt', rar: 'rare', pkt: 20, desc: 'Ein eigenes Firmenlogo wurde ausgewählt.', m: 'logo', ziel: 1, premium: true },
     { kat: 'Profil & Auftreten', icon: '🎯', name: 'Spezialist', rar: 'rare', pkt: 25, desc: 'Eine Speditions-Spezialisierung wurde gewählt.', m: 'spezialisierung', ziel: 1, premium: true },
     { kat: 'Profil & Auftreten', icon: '🚛', name: 'Fuhrpark-Schaufenster', rar: 'rare', pkt: 25, desc: 'Mindestens ein Top-Fahrzeug wurde im Profil präsentiert.', m: null, premium: true },
-    { kat: 'Prestige', icon: '🥇', name: 'Ranglisten-Elite', rar: 'epic', pkt: 200, desc: 'Die Firma steht in den Top 10 der Rangliste.', m: null },
+    { kat: 'Prestige', icon: '🥇', name: 'Ranglisten-Elite', rar: 'epic', pkt: 200, desc: 'Die Firma steht in den Top 10 der Rangliste.', m: null, premium: true }, // Kriterium unbekannt (kein Zusammenhang mit Level/Fahrzeugen/Umsatz/Frachten/Bekanntheit erkennbar) -> ausgeblendet
     { kat: 'Prestige', icon: '🏁', name: '1.000 Frachten', rar: 'common', pkt: 0, desc: '1.000 Frachten erfolgreich abgeschlossen.', m: 'fracht', ziel: 1000 },
     { kat: 'Prestige', icon: '📈', name: '1 Mio. Jahresumsatz', rar: 'common', pkt: 0, desc: '1.000.000 Euro Umsatz im laufenden Jahr erreicht.', m: 'jahresumsatz', ziel: 1000000 },
     { kat: 'Prestige', icon: '🚚', name: '50 Fahrzeuge', rar: 'common', pkt: 0, desc: '50 aktive Fahrzeuge im Fuhrpark.', m: 'fahrzeuge', ziel: 50 },
