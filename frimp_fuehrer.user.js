@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.73
+// @version      0.29.74
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.73';
+  const SCRIPT_VERSION = '0.29.74';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -132,6 +132,11 @@
    * damit danach garantiert frische Daten kommen. Geteilte Treffer zählt `fiAbrufGespart`.
    */
   const FI_GET_TTL_MS = 30000;
+  // Fahrzeugpläne (dispatch.php) und Personal/Urlaub (staff.php) ändern sich nur durch eigene Buchungen
+  // (-> POST leert den Speicher) bzw. selten - deshalb 10 Minuten geteilt, damit Seitenaufruf, "Routen berechnen"
+  // und Datensammler denselben Abruf nutzen.
+  const FI_GET_TTL_PLAENE_MS = 10 * 60 * 1000;
+  const fiTtlFuer = adresse => (/\/game\/(dispatch|staff)\.php(\?|$)/.test(adresse) ? FI_GET_TTL_PLAENE_MS : FI_GET_TTL_MS);
   const fiGetSpeicher = new Map(); // url -> {zeit, promise}
   let fiAbrufGespart = 0;
   function fiGetSpeicherLeeren() { fiGetSpeicher.clear(); }
@@ -144,7 +149,7 @@
 
     if (methode === 'GET' && sameOrigin) {
       const treffer = fiGetSpeicher.get(adresse);
-      if (treffer && Date.now() - treffer.zeit < FI_GET_TTL_MS) {
+      if (treffer && Date.now() - treffer.zeit < fiTtlFuer(adresse)) {
         fiAbrufGespart++;
         fiAbrufHoerer.forEach(f => { try { f(); } catch (e) { /* ignorieren */ } });
         return (await treffer.promise).clone();
