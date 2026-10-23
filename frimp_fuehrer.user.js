@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.67
+// @version      0.29.68
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.67';
+  const SCRIPT_VERSION = '0.29.68';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3158,7 +3158,7 @@
       }
 
       // Hauptuntersuchung + Verschleiß gegen die echten Mindestwerte der Prüfstelle:
-      // HU-Chip immer (nächste Fälligkeit), Warnfarbe ab 60 Tage, kritisch ab 30 Tage / überfällig;
+      // HU-Chip nur bei Fälligkeit in <= 60 Tagen (orange), <= 30 Tage / überfällig (rot);
       // Verschleiß-Chip nur wenn ein Bauteil <= 10 Prozentpunkte über dem Mindestwert liegt (<= 0: defekt).
       const pruef = await fetchPruefstand();
       if (pruef?.length) {
@@ -3168,10 +3168,11 @@
           const tage = e.huDatum ? Math.ceil((e.huDatum.getTime() - jetztMs) / 86400000) : null;
           return { ...e, knapp, tage };
         });
-        const nachHU = eintraege.filter(e => e.tage != null).sort((x, y) => x.tage - y.tage);
+        // Nur anzeigen, wenn eine HU in <= 60 Tagen ansteht (oder überfällig ist)
+        const nachHU = eintraege.filter(e => e.tage != null && e.tage <= 60).sort((x, y) => x.tage - y.tage);
         if (nachHU.length) {
           const n = nachHU[0];
-          const stufe = n.tage <= 30 ? 'is-negative' : (n.tage <= 60 ? 'is-warn' : 'is-muted');
+          const stufe = n.tage <= 30 ? 'is-negative' : 'is-warn';
           const zeilen = nachHU.map(e => `${e.name} · HU ${e.huDatum.toLocaleDateString('de-DE')} (${e.tage < 0 ? `${-e.tage} T überfällig` : `in ${e.tage} T`}) · knappstes Bauteil: ${e.knapp.teil} +${e.knapp.reserve.toFixed(1).replace('.', ',')} pp`);
           html += `<a class="fi-dash-pill ${stufe}" href="/game/inspection-station.php" style="text-decoration:none;" data-fi-tip="${tipText(`Hauptuntersuchung alle 12 Monate (1.250 €), nur am Firmensitz ohne Touren.\n` + zeilen.join('\n'))}">🔧 HU ${n.huDatum.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })} · ${n.name.split(' ')[0]} ${n.name.split(' ')[1] ?? ''} <span style="font-weight:600;">in ${n.tage} T</span></a>`;
         }
