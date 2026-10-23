@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.65
+// @version      0.29.66
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.65';
+  const SCRIPT_VERSION = '0.29.66';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3077,11 +3077,26 @@
         if (i === 0 && z.restschuld != null) zeilen.push(`Restschuld gesamt: ${fmtEuro(z.restschuld)}`);
         html += `<a class="fi-dash-pill" href="/game/bank.php" style="text-decoration:none;" data-fi-tip="${tip(zeilen.join('\n'))}">💳 ${k} · ${eur(e.summe)} <span style="color:#9aa5b8; font-weight:600;">in ${inTagen} T</span></a>`;
       });
+      // Gehälter: monatlich am Tag der letzten Buchung (beobachtet: 28. um 00:01), nächster Termin = Folgemonat
+      let gehaltTermin = null;
       if (z.gehalt != null) {
-        html += `<a class="fi-dash-pill" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tip(`Gehälter ${fmtEuro(z.gehalt)} pro Monat (automatische Fixkosten).\nEinen Zahltermin nennt das Spiel nicht; seit 01.10. gab es noch keine Gehaltsbuchung.\nKündigungen rechnen anteilig (z. B. 23/31 Tage), also wird rückwirkend pro Monat gezahlt - vermutlich zum Monatswechsel.`)}">👥 ${eur(z.gehalt)}/Monat <span style="color:#9aa5b8; font-weight:600;">Termin offen</span></a>`;
+        const basis = z.letztesGehalt?.datum ?? null;
+        const tag = basis ? basis.getDate() : 28;
+        const std = basis ? [basis.getHours(), basis.getMinutes()] : [0, 1];
+        let kand = new Date(new Date().getFullYear(), new Date().getMonth(), tag, std[0], std[1]);
+        if (kand.getTime() <= jetzt) kand = new Date(kand.getFullYear(), kand.getMonth() + 1, tag, std[0], std[1]);
+        gehaltTermin = kand;
+        const inTagen = Math.max(0, Math.ceil((kand.getTime() - jetzt) / 86400000));
+        const tipText = [
+          `Gehaltsabrechnung monatlich (abgebucht am ${tag}. um ${String(std[0]).padStart(2, '0')}:${String(std[1]).padStart(2, '0')}).`,
+          z.letztesGehalt ? `Zuletzt ${z.letztesGehalt.datum.toLocaleDateString('de-DE')}: ${fmtEuro(z.letztesGehalt.betrag)}.` : '',
+          `Aktuelle Monatsgehälter: ${fmtEuro(z.gehalt)} (die Abrechnung kann anteilig abweichen, z. B. bei Neueinstellungen).`,
+        ].filter(Boolean).join('\n');
+        html += `<a class="fi-dash-pill" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tip(tipText)}">👥 ${kand.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })} · ~${eur(z.gehalt)} <span style="color:#9aa5b8; font-weight:600;">in ${inTagen} T</span></a>`;
       }
       // Warnung: Kontostand deckt die Raten der nächsten 14 Tage nicht
-      const faellig14 = z.raten.filter(r => r.faellig.getTime() > jetzt && r.faellig.getTime() < jetzt + 14 * 86400000).reduce((a, r) => a + r.betrag, 0);
+      const faellig14 = z.raten.filter(r => r.faellig.getTime() > jetzt && r.faellig.getTime() < jetzt + 14 * 86400000).reduce((a, r) => a + r.betrag, 0)
+        + (gehaltTermin && gehaltTermin.getTime() < jetzt + 14 * 86400000 ? z.gehalt : 0);
       if (z.konto != null && faellig14 > z.konto) {
         html += `<span class="fi-dash-pill is-warn">⚠ Kontostand reicht nicht für die Raten (${eur(faellig14)})</span>`;
       }
@@ -3603,11 +3618,11 @@
   }
 
   /**
-   * Zahlungsplan aus bank.php: geplante Kreditraten (Fälligkeit, Betrag, Tilgung/Zinsen),
-   * Monatsgehälter, Restschuld, Kontostand. Der Zahltermin der Gehälter steht NICHT im Spiel
-   * (weder Bank noch Personal noch Hilfe-Wiki); in der Buchungshistorie gibt es bisher keine
-   * Gehaltsbuchung - Kündigungen rechnen anteilig ("23/31 Tage"), also wird rückwirkend pro
-   * Monat gezahlt, vermutlich zum Monatswechsel.
+   * Zahlungsplan: geplante Kreditraten aus bank.php (Fälligkeit, Betrag, Tilgung/Zinsen),
+   * Monatsgehälter, Restschuld, Kontostand - plus die letzte Gehaltsbuchung aus dem Kontoauszug
+   * (account_statement.php, category=salary, mit from/to - ohne Zeitraum zeigt er nur den
+   * laufenden Monat!). Beobachtet: "Gehaltsabrechnung fuer 2026-09" am 28.09.2026 00:01
+   * (33.711,67 €) -> Gehälter werden monatlich am 28. um 00:01 abgebucht.
    */
   async function fetchZahlungsplan() {
     try {
@@ -3623,7 +3638,24 @@
       });
       const text = (doc.body.textContent || '').replace(/\s+/g, ' ');
       const nimm = re => { const m = re.exec(text); return m ? zahl(m[1]) : null; };
+
+      // Letzte Gehaltsbuchung (letzte 120 Tage)
+      let letztesGehalt = null;
+      try {
+        const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        const von = new Date(Date.now() - 120 * 86400000);
+        const r2 = await fetch(`/game/account_statement.php?from=${iso(von)}&to=${iso(new Date())}&category=salary`, { credentials: 'same-origin', cache: 'no-store' });
+        const d2 = safeParseHtml(await r2.text());
+        d2.querySelectorAll('tbody tr').forEach(tr => {
+          const c = [...tr.children].map(x => x.textContent.replace(/\s+/g, ' ').trim());
+          const m = /^(\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2})$/.exec(c[0] ?? '');
+          if (!m || c[1] !== 'Gehalt') return;
+          const datum = new Date(+m[3], +m[2] - 1, +m[1], +m[4], +m[5]);
+          if (!letztesGehalt || datum > letztesGehalt.datum) letztesGehalt = { datum, betrag: Math.abs(zahl((c[4] ?? '0').replace(/[^\d.,]/g, ''))) };
+        });
+      } catch (e) { /* Gehaltstermin bleibt dann ohne Datum */ }
       return {
+        letztesGehalt,
         raten: raten.sort((a, b) => a.faellig - b.faellig),
         gehalt: nimm(/Monatliche Gehälter\s*([\d.,]+) €/),
         restschuld: nimm(/Aktuelle Restschuld\s*([\d.,]+) €/),
