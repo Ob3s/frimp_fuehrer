@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.89
+// @version      0.29.90
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.89';
+  const SCRIPT_VERSION = '0.29.90';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3176,11 +3176,8 @@
         <div id="fi-dash-cats" class="fi-cat-row"></div>
         <select id="fi-dash-bodytype" style="display:none;"></select>
         <button type="button" id="fi-dash-load-btn" class="fi-dash-btn" style="display:none;">Routen berechnen</button>
-        <button type="button" id="fi-dash-reload-btn" class="fi-dash-btn-reload" title="Cache umgehen und frisch laden">🔄</button>
-        <div class="fi-dash-field">
-          <label><input type="checkbox" id="fi-dash-autofill-dry" checked> Trockenlauf</label>
-        </div>
         <button type="button" id="fi-dash-autofill-btn" class="fi-dash-btn" title="Nimmt für ALLE Fahrzeuge fortlaufend die besten Komplettladungen an und plant sie ein, bis das Planungsfenster voll ist">⚡ Alle befüllen</button>
+        <button type="button" id="fi-dash-reload-btn" class="fi-dash-btn-reload" title="Cache umgehen und frisch laden">🔄</button>
       </div>
       <div id="fi-dash-results" class="fi-dash-grid"></div>
 
@@ -3727,12 +3724,61 @@
     let autofillLaeuft = false;
     let autofillAbbruch = false;
     let autofillKategorie = null; // gesetzt vom "Alle <Frachtart> befüllen"-Knopf: nur Fahrzeuge dieser Kategorie
+    let befuellPlan = null; // zuletzt berechneter Plan, wartet auf "Touren bestätigen"
+    resultsEl.addEventListener('click', ev => {
+      if (ev.target.closest('.fi-bestaetigen')) bucheBefuellPlan();
+    });
     resultsEl.addEventListener('click', ev => {
       const b = ev.target.closest('.fi-cat-fill');
       if (!b) return;
       autofillKategorie = b.dataset.kategorie;
       autofillBtn.click();
     });
+
+    async function bucheBefuellPlan() {
+      if (autofillLaeuft || !befuellPlan?.length) return;
+      const plan = befuellPlan;
+      befuellPlan = null;
+      autofillLaeuft = true;
+      autofillAbbruch = false;
+      const originalText = autofillBtn.textContent;
+      autofillBtn.textContent = '⏹ Stopp';
+      loadBtn.disabled = true;
+      reloadBtn.disabled = true;
+      resultsEl.innerHTML = '<div id="fi-autofill-konsole" style="grid-column: 1 / -1;"></div><div id="fi-autofill-log" style="grid-column: 1 / -1;"></div>';
+      const logEl = document.getElementById('fi-autofill-log');
+      const konsole = baueScanKonsole(document.getElementById('fi-autofill-konsole'), 'Touren buchen');
+      delete resultsEl.dataset.gesehen;
+      startWennSichtbar(resultsEl);
+      resultsEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      const log = (text, klasse = 'fi-muted') => { logEl.insertAdjacentHTML('beforeend', `<div class="fi-dash-row ${klasse}">${text}</div>`); };
+      try {
+        const erg = await fuehreBefuellPlanAus({
+          plan,
+          log,
+          abgebrochen: () => autofillAbbruch,
+          fortschritt: ({ schritt, gesamt, text }) => {
+            konsole.stufe(`Schritt ${schritt}/${gesamt} · ${text} …`);
+            konsole.fortschritt(schritt / gesamt);
+            if (!autofillAbbruch) autofillBtn.textContent = `⏹ Stopp · ${schritt}/${gesamt}`;
+          },
+        });
+        konsole.fortschritt(1);
+        konsole.ende('Fertig');
+        log(`<strong>Fertig:</strong> ${erg.gebucht} von ${plan.length} Touren eingeplant · ${fmtEuro(erg.summe)}${erg.fehler ? ` · ${erg.fehler} fehlgeschlagen` : ''}`, erg.fehler ? 'fi-warn' : 'fi-good');
+      } catch (e) {
+        console.error('[FI-Helper] Plan buchen fehlgeschlagen', e);
+        log(`Fehler: ${e.message}`, 'fi-bad');
+        konsole.ende('Fehler');
+      } finally {
+        autofillLaeuft = false;
+        autofillBtn.textContent = originalText;
+        loadBtn.disabled = false;
+        reloadBtn.disabled = false;
+        fiGetSpeicherLeeren();
+        await aktualisiereFlotte();
+      }
+    }
 
     autofillBtn.addEventListener('click', async () => {
       if (autofillLaeuft) {
@@ -3743,7 +3789,8 @@
       }
       const nurKategorie = autofillKategorie;
       autofillKategorie = null;
-      const trocken = document.getElementById('fi-dash-autofill-dry').checked;
+      const trocken = true; // "Alle befüllen" berechnet nur - gebucht wird erst nach "Touren bestätigen"
+      befuellPlan = null;
       fiGetSpeicherLeeren(); // Befüllen startet immer mit frischen Daten
 
       autofillLaeuft = true;
@@ -3779,9 +3826,13 @@
         });
         konsole.fortschritt(1);
         konsole.ende('Fertig');
-        log(trocken
-          ? `<strong>Trockenlauf:</strong> ${ergebnis.anzahlAngenommen} Aufträge · ${fmtEuro(ergebnis.summeEuro)}`
-          : `<strong>Fertig:</strong> ${ergebnis.anzahlAngenommen} Aufträge eingeplant · ${fmtEuro(ergebnis.summeEuro)}`, 'fi-good');
+        if (ergebnis.plan?.length) {
+          befuellPlan = ergebnis.plan;
+          log(`<strong>${ergebnis.plan.length} Touren berechnet</strong> · ${fmtEuro(ergebnis.summeEuro)}`, 'fi-good');
+          logEl.insertAdjacentHTML('beforeend', `<div class="fi-dash-row" style="margin-top:8px;"><button type="button" class="fi-dash-btn fi-bestaetigen">✅ Touren bestätigen (${ergebnis.plan.length} · ${fmtEuro(ergebnis.summeEuro)})</button></div>`);
+        } else {
+          log('Nichts einplanbar.', 'fi-muted');
+        }
       } catch (e) {
         console.error('[FI-Helper] Automatisches Befüllen fehlgeschlagen', e);
         log(`Fehler: ${e.message}`, 'fi-bad');
@@ -4221,6 +4272,7 @@
     let simulierteFlotte = null;
     let anzahlAngenommen = 0;
     let summeEuro = 0;
+    const plan = []; // berechnete Buchungen (Reihenfolge = Reihenfolge der Ausführung), siehe fuehreBefuellPlanAus
 
     const dieselPreisLive = await fetchDieselPreis(false);
     if (dieselPreisLive != null) ASSUMPTIONS.dieselPreisProLiter = dieselPreisLive;
@@ -4320,7 +4372,11 @@
           if (trocken) {
             const f = fleet.find(x => String(x.status.vehicleId) === String(z.eintrag.vehicleId));
             f.status = { ...f.status, freiAbZeit: bewertung.ankunftZeit, freiAbOrt: fracht.zielOrt };
-            log(`🧪 ${beschreibung}`, 'fi-good');
+            log(`▸ ${beschreibung}`, 'fi-good');
+            plan.push({
+              vehicleId: z.eintrag.vehicleId, fahrzeugName, jobId: fracht.jobId, verguetung: fracht.verguetungEuro ?? 0,
+              beschreibung, freiAbMs: freiAbVorher.getTime(), beladungMs: bewertung.beladungsStartZeit.getTime(),
+            });
           } else {
             await nimmFrachtAnUndPlaneEin(fracht.jobId, z.eintrag.vehicleId, freiAbVorher, bewertung.beladungsStartZeit, fahrzeugName);
             letztesFreiAb.set(String(z.eintrag.vehicleId), freiAbVorher.getTime());
@@ -4339,7 +4395,48 @@
       }
     }
 
-    return { anzahlAngenommen, summeEuro };
+    return { anzahlAngenommen, summeEuro, plan };
+  }
+
+  /**
+   * Bucht einen zuvor berechneten Befüll-Plan (ohne die Frachtbörse neu zu laden): je Eintrag annehmen +
+   * einplanen (alles oder nichts je Auftrag). Folgebuchungen desselben Fahrzeugs starten am echten "frei ab"
+   * nach der vorherigen Buchung. Scheitert eine Buchung (z. B. Auftrag inzwischen vergeben), werden die
+   * restlichen Touren dieses Fahrzeugs übersprungen, alle anderen Fahrzeuge laufen weiter.
+   */
+  async function fuehreBefuellPlanAus({ plan, log, fortschritt, abgebrochen }) {
+    let gebucht = 0, fehler = 0, summe = 0;
+    const gesperrt = new Set();
+    const echtesFreiAb = new Map();
+    for (let i = 0; i < plan.length; i++) {
+      if (abgebrochen()) { log('⏹ Vom Nutzer gestoppt.', 'fi-warn'); break; }
+      const z = plan[i];
+      const kurz = z.fahrzeugName.split(' · ')[0];
+      fortschritt({ schritt: i + 1, gesamt: plan.length, text: `Buche ${kurz}` });
+      if (gesperrt.has(String(z.vehicleId))) { log(`⏭ ${kurz}: übersprungen (vorherige Buchung dieses Fahrzeugs scheiterte)`, 'fi-muted'); continue; }
+      const freiAb = echtesFreiAb.get(String(z.vehicleId)) ?? new Date(z.freiAbMs);
+      try {
+        await nimmFrachtAnUndPlaneEin(z.jobId, z.vehicleId, freiAb, new Date(z.beladungMs), z.fahrzeugName);
+        gebucht++;
+        summe += z.verguetung;
+        log(`✅ ${z.beschreibung}`, 'fi-good');
+        if (plan.slice(i + 1).some(x => String(x.vehicleId) === String(z.vehicleId))) {
+          const st = await fetchVehicleStatus(z.vehicleId);
+          if (!st?.freiAbZeit || st.freiAbZeit.getTime() <= freiAb.getTime()) {
+            gesperrt.add(String(z.vehicleId));
+            log(`⚠ ${kurz}: neues "frei ab" nicht lesbar - weitere Touren dieses Fahrzeugs übersprungen`, 'fi-warn');
+          } else {
+            echtesFreiAb.set(String(z.vehicleId), st.freiAbZeit);
+          }
+        }
+      } catch (e) {
+        fehler++;
+        gesperrt.add(String(z.vehicleId));
+        log(`❌ ${kurz}: ${z.beschreibung.split(' · ')[0].replace(/^[^:]+: /, '')} fehlgeschlagen: ${e.message}`, 'fi-bad');
+        console.error('[FI-Helper] Plan-Buchung fehlgeschlagen', z, e);
+      }
+    }
+    return { gebucht, fehler, summe };
   }
 
   /**
