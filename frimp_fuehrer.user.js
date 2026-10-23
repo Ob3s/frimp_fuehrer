@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.85
+// @version      0.29.86
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.85';
+  const SCRIPT_VERSION = '0.29.86';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -5286,10 +5286,10 @@
     { kat: 'Fuhrpark', icon: '🏭', name: 'Fuhrpark-Imperium', rar: 'epic', pkt: 180, desc: '100 Fahrzeuge stehen im Fuhrpark.', m: 'fahrzeuge', ziel: 100 },
     { kat: 'Profil & Auftreten', icon: '🏢', name: 'Profil gestartet', rar: 'common', pkt: 5, desc: 'Die eigene Firmenseite wurde angelegt.', m: 'immer', ziel: 1 },
     { kat: 'Profil & Auftreten', icon: '📝', name: 'Werbetafel', rar: 'common', pkt: 10, desc: 'Ein eigener Werbetext wurde im Spielerprofil hinterlegt.', m: 'werbetext', ziel: 1 },
-    { kat: 'Profil & Auftreten', icon: '⭐', name: 'Premium-Auftritt', rar: 'rare', pkt: 25, desc: 'Ein Premium-Spielerprofil wurde aktiviert (nur mit Premium).', m: null },
-    { kat: 'Profil & Auftreten', icon: '🛡️', name: 'Markenauftritt', rar: 'rare', pkt: 20, desc: 'Ein eigenes Firmenlogo wurde ausgewählt.', m: 'logo', ziel: 1 },
-    { kat: 'Profil & Auftreten', icon: '🎯', name: 'Spezialist', rar: 'rare', pkt: 25, desc: 'Eine Speditions-Spezialisierung wurde gewählt.', m: 'spezialisierung', ziel: 1 },
-    { kat: 'Profil & Auftreten', icon: '🚛', name: 'Fuhrpark-Schaufenster', rar: 'rare', pkt: 25, desc: 'Mindestens ein Top-Fahrzeug wurde im Profil präsentiert.', m: null },
+    { kat: 'Profil & Auftreten', icon: '⭐', name: 'Premium-Auftritt', rar: 'rare', pkt: 25, desc: 'Ein Premium-Spielerprofil wurde aktiviert (nur mit Premium).', m: null, premium: true },
+    { kat: 'Profil & Auftreten', icon: '🛡️', name: 'Markenauftritt', rar: 'rare', pkt: 20, desc: 'Ein eigenes Firmenlogo wurde ausgewählt.', m: 'logo', ziel: 1, premium: true },
+    { kat: 'Profil & Auftreten', icon: '🎯', name: 'Spezialist', rar: 'rare', pkt: 25, desc: 'Eine Speditions-Spezialisierung wurde gewählt.', m: 'spezialisierung', ziel: 1, premium: true },
+    { kat: 'Profil & Auftreten', icon: '🚛', name: 'Fuhrpark-Schaufenster', rar: 'rare', pkt: 25, desc: 'Mindestens ein Top-Fahrzeug wurde im Profil präsentiert.', m: null, premium: true },
     { kat: 'Prestige', icon: '🥇', name: 'Ranglisten-Elite', rar: 'epic', pkt: 200, desc: 'Die Firma steht in den Top 10 der Rangliste.', m: null },
     { kat: 'Prestige', icon: '🏁', name: '1.000 Frachten', rar: 'common', pkt: 0, desc: '1.000 Frachten erfolgreich abgeschlossen.', m: 'fracht', ziel: 1000 },
     { kat: 'Prestige', icon: '📈', name: '1 Mio. Jahresumsatz', rar: 'common', pkt: 0, desc: '1.000.000 Euro Umsatz im laufenden Jahr erreicht.', m: 'jahresumsatz', ziel: 1000000 },
@@ -5351,7 +5351,8 @@
     };
 
     const nf = n => Math.round(n).toLocaleString('de-DE');
-    const eintraege = ACHIEVEMENT_KATALOG.map(a => {
+    // Erfolge, die Premium-Funktionen voraussetzen (Logo, Top-3-Fahrzeuge, Spezialisierung, Premium-Profil), sind ohne Premium ausgeblendet
+    const eintraege = ACHIEVEMENT_KATALOG.filter(a => !a.premium).map(a => {
       const pruefbar = !!a.m;
       const wert = pruefbar ? messwerte[a.m] : null;
       return { ...a, pruefbar, wert, offen: pruefbar && wert >= a.ziel };
