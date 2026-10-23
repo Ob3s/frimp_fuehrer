@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.66
+// @version      0.29.67
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.66';
+  const SCRIPT_VERSION = '0.29.67';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3019,8 +3019,6 @@
       <h3>Tourenplan</h3>
       <div id="fi-dash-timeline"><div class="fi-empty">Lade Tourenplan …</div></div>
 
-      <div id="fi-dash-contracts" class="fi-dash-grid"></div>
-
     `;
 
     // Nach den Statistik-Karten einfügen, vor der (jetzt versteckten) Sperr-Meldung
@@ -3159,28 +3157,30 @@
         html += `<a class="fi-dash-pill is-warn" href="/game/fuhrpark.php" style="text-decoration:none;" data-fi-tip="${tipText(fehlendeFahrzeuge.map(([, d]) => d.typ || 'Unbekannter Typ').join('\n'))}">⚠ ${fehlendeFahrzeuge.length} ohne Fahrer</a>`;
       }
 
-      // Verschleiß & Hauptuntersuchung (Schwelle = Spiel-Klasse, siehe parseVerschleiss)
-      const verschleissWarnungen = [];
-      fleet.forEach(f => {
-        const vehicleId = f.status?.vehicleId;
-        if (!vehicleId) return;
-        const d = fuhrparkDetails.get(String(vehicleId));
-        if (!d) return;
-        [{ label: f.name, info: d.verschleiss }, ...(d.auflieger ? [{ label: `${f.name} · Auflieger`, info: d.auflieger }] : [])]
-          .forEach(({ label, info }) => {
-            const zustandKritisch = info.zustandStufe && !['good', 'ok'].includes(info.zustandStufe);
-            const huKritisch = info.huStatus && info.huStatus !== 'valid';
-            if (zustandKritisch || huKritisch) verschleissWarnungen.push({ label, info, zustandKritisch, huKritisch });
-          });
-      });
-      if (verschleissWarnungen.length) {
-        const tip = verschleissWarnungen.map(w => {
-          const teile = [];
-          if (w.zustandKritisch) teile.push(`Zustand ${w.info.zustandProzent != null ? w.info.zustandProzent + '%' : '?'}`);
-          if (w.huKritisch) teile.push(`HU ${w.info.huDatum ?? '?'} (${w.info.huStatus})`);
-          return `${w.label}: ${teile.join(' · ')}`;
-        }).join('\n');
-        html += `<a class="fi-dash-pill is-warn" href="/game/fuhrpark.php" style="text-decoration:none;" data-fi-tip="${tipText(tip)}">🔧 ${verschleissWarnungen.length} Verschleiß/HU</a>`;
+      // Hauptuntersuchung + Verschleiß gegen die echten Mindestwerte der Prüfstelle:
+      // HU-Chip immer (nächste Fälligkeit), Warnfarbe ab 60 Tage, kritisch ab 30 Tage / überfällig;
+      // Verschleiß-Chip nur wenn ein Bauteil <= 10 Prozentpunkte über dem Mindestwert liegt (<= 0: defekt).
+      const pruef = await fetchPruefstand();
+      if (pruef?.length) {
+        const jetztMs = Date.now();
+        const eintraege = pruef.map(e => {
+          const knapp = e.teile.reduce((m, t) => (t.wert - t.min < m.reserve ? { teil: t.name, reserve: t.wert - t.min } : m), { teil: '', reserve: Infinity });
+          const tage = e.huDatum ? Math.ceil((e.huDatum.getTime() - jetztMs) / 86400000) : null;
+          return { ...e, knapp, tage };
+        });
+        const nachHU = eintraege.filter(e => e.tage != null).sort((x, y) => x.tage - y.tage);
+        if (nachHU.length) {
+          const n = nachHU[0];
+          const stufe = n.tage <= 30 ? 'is-negative' : (n.tage <= 60 ? 'is-warn' : 'is-muted');
+          const zeilen = nachHU.map(e => `${e.name} · HU ${e.huDatum.toLocaleDateString('de-DE')} (${e.tage < 0 ? `${-e.tage} T überfällig` : `in ${e.tage} T`}) · knappstes Bauteil: ${e.knapp.teil} +${e.knapp.reserve.toFixed(1).replace('.', ',')} pp`);
+          html += `<a class="fi-dash-pill ${stufe}" href="/game/inspection-station.php" style="text-decoration:none;" data-fi-tip="${tipText(`Hauptuntersuchung alle 12 Monate (1.250 €), nur am Firmensitz ohne Touren.\n` + zeilen.join('\n'))}">🔧 HU ${n.huDatum.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })} · ${n.name.split(' ')[0]} ${n.name.split(' ')[1] ?? ''} <span style="font-weight:600;">in ${n.tage} T</span></a>`;
+        }
+        const knappe = eintraege.filter(e => e.knapp.reserve <= 10).sort((x, y) => x.knapp.reserve - y.knapp.reserve);
+        if (knappe.length) {
+          const defekt = knappe.some(e => e.knapp.reserve <= 0);
+          const zeilen = knappe.map(e => `${e.name}: ${e.knapp.teil} ${e.knapp.reserve <= 0 ? 'DEFEKT (unter Mindestwert)' : `nur +${e.knapp.reserve.toFixed(1).replace('.', ',')} pp über dem Mindestwert`}`);
+          html += `<a class="fi-dash-pill ${defekt ? 'is-negative' : 'is-warn'}" href="/game/workshop.php" style="text-decoration:none;" data-fi-tip="${tipText(zeilen.join('\n'))}">⚠ Verschleiß ${knappe.length}× · ${knappe[0].name} ${knappe[0].knapp.teil}</a>`;
+        }
       }
 
       // Urlaub: Hinweis NUR bei (noch) offenem Antrag; genehmigte -> 🌴 im Tourenplan
@@ -3191,33 +3191,6 @@
         .forEach(u => {
           html += `<a class="fi-dash-pill is-warn" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tipText(`Urlaubsantrag ${u.fahrer} (${u.fzName.split(' · ')[0]}): ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')}\nNoch offen - die Planung behandelt ihn schon wie genehmigt.`)}">🌴 Antrag ${u.fahrer.split(' ').pop()} · ${kurz(u.von)}–${kurz(u.bis)}</a>`;
         });
-
-      // Frachtverträge: nur ANZEIGE und Bewertung, keine Annahme - wie Abrufe im
-      // Spiel ablaufen ist noch nicht beobachtet, eine Annahme wäre verbindlich.
-      const vertraegeEl = document.getElementById('fi-dash-contracts');
-      if (vertraegeEl) {
-        const vertraege = (await fetchFrachtvertraege()).filter(v => v.status === 'angebot');
-        const fleetTypisiert = baueFleetMitTyp(fleet, fuhrparkDetails, null);
-        const zeilen = vertraege.map(v => {
-          const b = bewerteVertrag(v, fleetTypisiert);
-          const kurzName = (v.name ?? 'Vertrag').replace(/^(Rahmenvertrag|Intensivvertrag):\s*/, '').trim();
-          const tip = [
-            `${v.name ?? 'Vertrag'}${v.tier ? ' (' + v.tier + ')' : ''}`,
-            `${v.von} → ${v.nach}, ${v.streckeKm} km, Setup: ${v.setup ?? '?'}`,
-            `${fmtEuro(v.verguetungProAbruf ?? 0)} je Abruf, ${v.abrufeProTag}/Tag, Ziel ${v.zielAbrufe} in ${v.laufzeitTage} Tagen`,
-            `Umsatz ${fmtEuro(b.umsatz)} + Bonus ${fmtEuro(v.bonus ?? 0)} (${b.bonusAnteilProzent != null ? b.bonusAnteilProzent.toFixed(1) : '?'} %)`,
-            `Vertragsstrafe ${fmtEuro(v.strafe ?? 0)} (${b.risikoFaktor != null ? b.risikoFaktor.toFixed(1) : '?'}x ein Abruf), 3. Fehlabruf = Vertrag scheitert`,
-            `Fahrzeugbedarf ca. ${b.fahrzeugBedarf} (Zyklus ~${b.zyklusTage.toFixed(1)} Tage je Abruf)`,
-            `Angebot gültig bis ${v.gueltigBis ?? '?'}`,
-          ].join('\n').replace(/"/g, '&quot;');
-          return `<div class="fi-dash-row" style="font-size:12px; margin:2px 0;" data-fi-tip="${tip}">${b.passende.length ? '✅' : '❌'} <strong>${kurzName}</strong> · ${v.von}→${v.nach} ${v.streckeKm} km · ${fmtEuro(v.verguetungProAbruf ?? 0)}/Abruf · ${v.zielAbrufe}× in ${v.laufzeitTage} T · ~${b.fahrzeugBedarf} Fz${b.passende.length ? '' : ' · <span class="fi-muted">kein passendes Fahrzeug</span>'}</div>`;
-        });
-        const passend = vertraege.filter(v => bewerteVertrag(v, fleetTypisiert).passende.length).length;
-        vertraegeEl.innerHTML = `<details style="grid-column: 1 / -1;">
-          <summary style="cursor:pointer; font-size:12px; color:#9aa5b8;">📜 Frachtverträge: ${vertraege.length} Angebot(e), ${passend} passend zur Flotte (antippen)</summary>
-          ${zeilen.join('') || '<div class="fi-empty">Keine neuen Vertragsangebote.</div>'}
-        </details>`;
-      }
 
       // Die einzelnen Fahrzeugkarten sind auf Wunsch entfallen (die Timeline zeigt
       // alles); übrig bleibt die Warnung für Fahrzeuge ohne Fahrer plus die
@@ -3615,6 +3588,48 @@
       fetchFuhrparkDetails(erzwingeNeuladen),
     ]);
     return { fleetMitLive, detailsMap };
+  }
+
+  /**
+   * Prüfstelle (inspection-station.php): je Fahrzeug UND Auflieger die Hauptuntersuchung
+   * (Intervall 12 Monate, "Fällig am") und die Bauteilprüfung mit den echten Mindestwerten
+   * des Spiels (Reifen 20 %, Bremsen 20 %, Kupplung 25 %, Motor 40 %, Fahrgestell 45 %;
+   * "Ein Bauteil unter seinem Mindestwert bedeutet defekt"). HU nur am Firmensitz ohne Touren
+   * (1.250 €). Reserve = Zustand - Mindestwert in Prozentpunkten.
+   * @returns {Promise<{name:string, istAuflieger:boolean, huDatum:Date|null, standort:string, teile:{name:string, wert:number, min:number}[]}[]|null>}
+   */
+  let pruefstandCache = null;
+  async function fetchPruefstand() {
+    if (pruefstandCache && Date.now() - pruefstandCache.zeit < 10 * 60 * 1000) return pruefstandCache.daten;
+    try {
+      const res = await fetch('/game/inspection-station.php', { credentials: 'same-origin', cache: 'no-store' });
+      if (!res.ok) return null;
+      const doc = safeParseHtml(await res.text());
+      const zahl = t => parseFloat(t.replace(/\./g, '').replace(',', '.'));
+      const daten = [...doc.querySelectorAll('.inspection-card')].map(c => {
+        const text = c.textContent.replace(/\s+/g, ' ').trim();
+        const istAuflieger = /Anhänger|Auflieger/i.test(c.querySelector('.inspection-card__type')?.textContent ?? '');
+        const h2 = c.querySelector('h2')?.textContent.trim() ?? '?';
+        const serial = c.querySelector('.fi-license-plate__serial')?.textContent.trim();
+        const hu = /Fällig am\s*(\d{2})\.(\d{2})\.(\d{4})/.exec(text);
+        const teile = [...c.querySelectorAll('tbody tr')].map(r => {
+          const x = [...r.children].map(e => e.textContent.replace(/\s+/g, ' ').trim());
+          return { name: (x[0] ?? '').split(' ')[0], wert: zahl(x[1] ?? ''), min: zahl(x[2] ?? '') };
+        }).filter(t => Number.isFinite(t.wert) && Number.isFinite(t.min));
+        return {
+          name: istAuflieger && serial ? `${h2} ${serial}` : h2,
+          istAuflieger,
+          huDatum: hu ? new Date(+hu[3], +hu[2] - 1, +hu[1]) : null,
+          standort: /Standort\s*([^]+?)\s*(?:Aktuelle|$)/.exec(text)?.[1] ?? '',
+          teile,
+        };
+      });
+      pruefstandCache = { zeit: Date.now(), daten };
+      return daten;
+    } catch (e) {
+      console.warn('[FI-Helper] Prüfstelle konnte nicht geladen werden', e);
+      return null;
+    }
   }
 
   /**
