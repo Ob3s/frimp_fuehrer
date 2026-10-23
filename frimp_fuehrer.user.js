@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.69
+// @version      0.29.70
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.69';
+  const SCRIPT_VERSION = '0.29.70';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -114,6 +114,33 @@
    * @type {{label: string, dauerMs: number, fehler: string|null}[]}
    */
   let fiAbrufProtokoll = [];
+
+  /**
+   * Lückenloses Abruf-Log: JEDER Seitenaufruf des Skripts (Frachtbörse, Fahrzeuge, Personal,
+   * Kredite, Posteingang, Prüfstelle, Buchungen, Sync …) läuft über fiFetch und wird mit
+   * Zeit, Methode, Adresse, Statuscode und Antwortzeit protokolliert. Nur Adresse - keine
+   * Header (Token!) und keine Formularinhalte.
+   * @type {{start: number, methode: string, url: string, ms: number|null, status: number|string|null}[]}
+   */
+  const fiAbrufLog = [];
+  const fiAbrufHoerer = new Set();
+  async function fiFetch(url, opts) {
+    const t0 = performance.now();
+    const eintrag = { start: Date.now(), methode: String(opts?.method ?? 'GET').toUpperCase(), url: String(url), ms: null, status: null };
+    fiAbrufLog.push(eintrag);
+    if (fiAbrufLog.length > 3000) fiAbrufLog.shift();
+    try {
+      const res = await window.fetch(url, opts);
+      eintrag.status = res.status;
+      return res;
+    } catch (e) {
+      eintrag.status = 'Fehler';
+      throw e;
+    } finally {
+      eintrag.ms = Math.round(performance.now() - t0);
+      fiAbrufHoerer.forEach(f => { try { f(); } catch (e) { /* Anzeige darf Abrufe nie stören */ } });
+    }
+  }
 
   /**
    * Führt einen fetch()-Aufruf aus und misst dabei die Dauer fürs
@@ -358,7 +385,7 @@
         const heute = new Date();
         const datumIso = `${heute.getFullYear()}-${String(heute.getMonth() + 1).padStart(2, '0')}-${String(heute.getDate()).padStart(2, '0')}`;
         const url = `/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}&date=${datumIso}`;
-        const res = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+        const res = await fiFetch(url, { credentials: 'same-origin', cache: 'no-store' });
         if (!res.ok) return null;
         const html = await res.text();
         const doc = safeParseHtml(html);
@@ -398,7 +425,7 @@
         const heute = new Date();
         const datumIso = `${heute.getFullYear()}-${String(heute.getMonth() + 1).padStart(2, '0')}-${String(heute.getDate()).padStart(2, '0')}`;
         const ergebnis = await protokolliereAbruf('Fahrzeugliste + erstes Fahrzeug (dispatch.php)', async () => {
-          const res = await fetch(`/game/dispatch.php?date=${datumIso}`, { credentials: 'same-origin', cache: 'no-store' });
+          const res = await fiFetch(`/game/dispatch.php?date=${datumIso}`, { credentials: 'same-origin', cache: 'no-store' });
           if (!res.ok) return { vehicles: [], status: null };
           const html = await res.text();
           const doc = safeParseHtml(html);
@@ -443,7 +470,7 @@
   async function fetchLiveDriverStatus(vehicleId, label = vehicleId) {
     try {
       return await protokolliereAbruf(`Live-Fahrerstatus ${label} (driver_time_status.php)`, async () => {
-        const res = await fetch(`/game/driver_time_status.php?vehicle_id=${encodeURIComponent(vehicleId)}`, {
+        const res = await fiFetch(`/game/driver_time_status.php?vehicle_id=${encodeURIComponent(vehicleId)}`, {
           credentials: 'same-origin',
           cache: 'no-store',
           headers: { Accept: 'application/json' },
@@ -631,7 +658,7 @@
       return optionen;
     }
     try {
-      const res = await fetch('/game/freight-market.php', { credentials: 'same-origin', cache: 'no-store' });
+      const res = await fiFetch('/game/freight-market.php', { credentials: 'same-origin', cache: 'no-store' });
       if (!res.ok) return [];
       const html = await res.text();
       const doc = safeParseHtml(html);
@@ -663,7 +690,7 @@
       if (filter.zielStadt) {
         url += `&destination_radius_city=${encodeURIComponent(filter.zielStadt)}&destination_radius_km=${filter.zielRadiusKm ?? 0}`;
       }
-      const res = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+      const res = await fiFetch(url, { credentials: 'same-origin', cache: 'no-store' });
       if (!res.ok) return { angebote: [], pagination: null };
       const html = await res.text();
       const doc = safeParseHtml(html);
@@ -1902,7 +1929,7 @@
       const daten = onFuhrparkPage
         ? parseFuhrparkDetails()
         : await protokolliereAbruf('Fuhrpark (fuhrpark.php)', async () => {
-            const res = await fetch('/game/fuhrpark.php', { credentials: 'same-origin', cache: 'no-store' });
+            const res = await fiFetch('/game/fuhrpark.php', { credentials: 'same-origin', cache: 'no-store' });
             if (!res.ok) return new Map();
             const html = await res.text();
             const doc = safeParseHtml(html);
@@ -1938,7 +1965,7 @@
     try {
       const wert = await protokolliereAbruf('Dieselpreis (pc.php)', async () => {
         const onPcPage = /\/game\/pc\.php/.test(location.pathname);
-        const doc = onPcPage ? document : safeParseHtml(await (await fetch('/game/pc.php', { credentials: 'same-origin', cache: 'no-store' })).text());
+        const doc = onPcPage ? document : safeParseHtml(await (await fiFetch('/game/pc.php', { credentials: 'same-origin', cache: 'no-store' })).text());
         const text = doc.querySelector(SELECTORS.dieselMarktpreis)?.textContent;
         return parseGermanNumber(text);
       });
@@ -1987,7 +2014,7 @@
     try {
       const anzahl = await protokolliereAbruf('Disponenten (staff.php)', async () => {
         const onStaffPage = /\/game\/staff\.php/.test(location.pathname);
-        const doc = onStaffPage ? document : safeParseHtml(await (await fetch('/game/staff.php', { credentials: 'same-origin', cache: 'no-store' })).text());
+        const doc = onStaffPage ? document : safeParseHtml(await (await fiFetch('/game/staff.php', { credentials: 'same-origin', cache: 'no-store' })).text());
         const rollen = Array.from(doc.querySelectorAll(SELECTORS.staffRolle)).map(el => el.textContent.trim());
         return rollen.filter(r => r === 'Disponent').length;
       });
@@ -2019,7 +2046,7 @@
       const start = new Date(Date.now() + 240 * 3600 * 1000);
       const pad = n => String(n).padStart(2, '0');
       const datum = `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`;
-      const res = await fetch('/game/plan_dispatch_order.php', {
+      const res = await fiFetch('/game/plan_dispatch_order.php', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -2174,7 +2201,7 @@
     }
     try {
       const daten = await protokolliereAbruf('Städte-Stammdaten (europe-map-data.php)', async () => {
-        const res = await fetch('/game/api/europe-map-data.php', { credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } });
+        const res = await fiFetch('/game/api/europe-map-data.php', { credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } });
         if (!res.ok) return null;
         const json = await res.json();
         if (!json?.ok || !Array.isArray(json.cities)) return null;
@@ -2432,6 +2459,16 @@
       @keyframes fi-shimmer { to { transform: translateX(400%); } }
       .fi-zeile-neu .fi-dash-phase-block { transform-origin: left center; animation: fi-wachs .5s ease-out backwards; }
       @media (prefers-reduced-motion: reduce) { .fi-karte, .fi-karte *, .fi-karte::before, .fi-scan *, .fi-skel::after, .fi-zeile-neu *, .fi-einflug, .fi-aufbau *, #fi-info-chips * { animation: none !important; } }
+
+      /* ====== Abruf-Log (ganz unten, zugeklappt) ====== */
+      #fi-dash-abrufe { margin-top: 10px; }
+      .fi-abrufe > summary { cursor: pointer; font: 600 11px ui-monospace, Consolas, monospace; color: #6f7b90; list-style: none; }
+      .fi-abrufe > summary::-webkit-details-marker { display: none; }
+      .fi-abrufe[open] > summary { color: #9aa5b8; }
+      .fi-abrufe-gruppen { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 6px 0; font: 600 11px ui-monospace, Consolas, monospace; color: #9aa5b8; }
+      .fi-abrufe-gruppen b { color: #ffd98a; }
+      .fi-abrufe-liste { max-height: 260px; overflow: auto; font: 11px ui-monospace, Consolas, monospace; color: #7f8aa0; line-height: 1.5; border-top: 1px solid rgba(255,255,255,.08); padding-top: 4px; }
+      .fi-abrufe-url { color: #9aa5b8; word-break: break-all; }
 
       /* ====== Timeline (mehrere Fahrzeuge auf einen Blick) ====== */
       .fi-dash-timeline-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; font-size: 11px; color: #cbd5e1; }
@@ -2701,7 +2738,7 @@
   async function fetchFrachtvertraege() {
     const num = str => (str ? parseFloat(str.replace(/\./g, '').replace(',', '.')) : null);
     try {
-      const res = await fetch('/game/freight-contracts.php', { credentials: 'same-origin', cache: 'no-store' });
+      const res = await fiFetch('/game/freight-contracts.php', { credentials: 'same-origin', cache: 'no-store' });
       const doc = safeParseHtml(await res.text());
       return Array.from(doc.querySelectorAll('article.contract-card, article')).map(a => {
         // Geparstes (nicht angezeigtes) HTML hat kein Layout: innerText fügt keine
@@ -2773,7 +2810,7 @@
   async function fetchUrlaubsSperren() {
     const sperren = new Map();
     try {
-      const res = await fetch('/game/staff.php', { credentials: 'same-origin', cache: 'no-store' });
+      const res = await fiFetch('/game/staff.php', { credentials: 'same-origin', cache: 'no-store' });
       const doc = safeParseHtml(await res.text());
       doc.querySelectorAll('article').forEach(card => {
         const t = card.innerText.replace(/\s+/g, ' ').trim();
@@ -2844,7 +2881,7 @@
    */
   async function rufeFahrzeugZurueck(vehicleId) {
     const body = new URLSearchParams({ dispatch_action: 'return_to_base', vehicle_id: String(vehicleId) });
-    const res = await fetch('/game/dispatch.php', {
+    const res = await fiFetch('/game/dispatch.php', {
       method: 'POST', body, credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
     const doc = safeParseHtml(await res.text());
@@ -3019,6 +3056,8 @@
       <h3>Tourenplan</h3>
       <div id="fi-dash-timeline"><div class="fi-empty">Lade Tourenplan …</div></div>
 
+      <div id="fi-dash-abrufe"></div>
+
     `;
 
     // Nach den Statistik-Karten einfügen, vor der (jetzt versteckten) Sperr-Meldung
@@ -3050,6 +3089,7 @@
       kopfEl.querySelector('#fi-sync-pill')?.addEventListener('click', () => { bedienSyncPill().catch(e => window.alert(`Sync: ${e.message}`)); });
     }
     await aktualisiereKopf();
+    starteAbrufAnzeige();
 
     // --- Mini-Übersicht: nächste Kreditraten (je Tag gebündelt) + Gehälter ---
     async function aktualisiereZahlungen() {
@@ -3614,7 +3654,7 @@
   async function fetchPruefstand() {
     if (pruefstandCache && Date.now() - pruefstandCache.zeit < 10 * 60 * 1000) return pruefstandCache.daten;
     try {
-      const res = await fetch('/game/inspection-station.php', { credentials: 'same-origin', cache: 'no-store' });
+      const res = await fiFetch('/game/inspection-station.php', { credentials: 'same-origin', cache: 'no-store' });
       if (!res.ok) return null;
       const doc = safeParseHtml(await res.text());
       const zahl = t => parseFloat(t.replace(/\./g, '').replace(',', '.'));
@@ -3664,7 +3704,7 @@
       const summe = new Map();
       let weiter = true;
       for (let seite = 1; seite <= 8 && weiter; seite++) {
-        const res = await fetch(`/game/inbox.php?filter=dispatch&page=${seite}`, { credentials: 'same-origin', cache: 'no-store' });
+        const res = await fiFetch(`/game/inbox.php?filter=dispatch&page=${seite}`, { credentials: 'same-origin', cache: 'no-store' });
         if (!res.ok) break;
         const karten = [...safeParseHtml(await res.text()).querySelectorAll('article.message-card')];
         if (!karten.length) break;
@@ -3688,6 +3728,66 @@
     }
   }
 
+  /** Lesbarer Name einer abgerufenen Seite (für Gruppierung und Liste im Abruf-Log). */
+  function abrufName(url) {
+    let u;
+    try { u = new URL(url, location.origin); } catch (e) { return 'Sonstige'; }
+    if (u.host !== location.host) return u.host.includes('github') ? 'GitHub-Sync' : u.host;
+    const pfad = u.pathname.split('/').pop();
+    const karte = {
+      'freight-market.php': 'Frachtbörse', 'dispatch.php': 'Fahrzeugpläne', 'fuhrpark.php': 'Fuhrpark', 'staff.php': 'Personal',
+      'recruitment.php': 'Personalbörse', 'bank.php': 'Bank / Kredite', 'account_statement.php': 'Kontoauszug', 'inbox.php': 'Posteingang',
+      'inspection-station.php': 'Prüfstelle', 'driver_time_status.php': 'Fahrerzeiten', 'pc.php': 'PC (Dieselpreis)',
+      'europe-map-data.php': 'Städtedaten', 'freight-contracts.php': 'Frachtverträge', 'truck-catalog.php': 'Fahrzeugkatalog',
+      'accept_freight_job.php': 'Auftrag annehmen', 'plan_dispatch_order.php': 'Auftrag einplanen',
+      'return_dispatch_order_to_market.php': 'Auftrag zurückgeben', 'office.php': 'Büro', 'active_tours.php': 'Tourenübersicht',
+    };
+    return karte[pfad] ?? pfad;
+  }
+
+  /** Zugeklappte Abruf-Zeile ganz unten im Dashboard: Summe oben, Gruppen + jede einzelne Seite darunter. */
+  function starteAbrufAnzeige() {
+    const el = document.getElementById('fi-dash-abrufe');
+    if (!el || el.dataset.aktiv) return;
+    el.dataset.aktiv = '1';
+    el.innerHTML = `<details class="fi-abrufe"><summary></summary><div class="fi-abrufe-body"></div></details>`;
+    const details = el.querySelector('details');
+    const summary = el.querySelector('summary');
+    const body = el.querySelector('.fi-abrufe-body');
+    const zeit = ms => ms >= 10000 ? `${(ms / 1000).toFixed(1).replace('.', ',')} s` : `${ms.toLocaleString('de-DE')} ms`;
+    const esc = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const render = () => {
+      const jetzt = Date.now();
+      // aktive Zeit = Vereinigung aller Abruf-Intervalle (parallele Abrufe zählen nicht doppelt)
+      const iv = fiAbrufLog.map(a => [a.start, a.start + (a.ms ?? (jetzt - a.start))]).sort((x, y) => x[0] - y[0]);
+      let aktiv = 0, ende = -Infinity, anfang = 0;
+      iv.forEach(([a, b]) => { if (a > ende) { aktiv += ende - anfang > 0 ? ende - anfang : 0; anfang = a; ende = b; } else if (b > ende) ende = b; });
+      if (ende > anfang) aktiv += ende - anfang;
+      summary.textContent = `🔎 ${fiAbrufLog.length.toLocaleString('de-DE')} Seiten aufgerufen in ${zeit(Math.round(aktiv))}`;
+      if (!details.open) return;
+      const gruppen = new Map();
+      fiAbrufLog.forEach(a => {
+        const g = gruppen.get(abrufName(a.url)) ?? { n: 0, ms: 0 };
+        g.n++; g.ms += a.ms ?? 0;
+        gruppen.set(abrufName(a.url), g);
+      });
+      const kopf = [...gruppen.entries()].sort((x, y) => y[1].n - x[1].n).map(([n, g]) => `<span><b>${esc(n)}</b> ${g.n}× · ${zeit(g.ms)}</span>`).join('');
+      const liste = fiAbrufLog.slice().reverse().map(a => {
+        let u; try { u = new URL(a.url, location.origin); } catch (e) { u = { host: '', pathname: a.url, search: '' }; }
+        const ziel = (u.host && u.host !== location.host ? u.host : '') + u.pathname + u.search;
+        const t = new Date(a.start);
+        const uhr = `${t.toLocaleTimeString('de-DE')}.${String(t.getMilliseconds()).padStart(3, '0')}`;
+        return `<div>${uhr} · ${a.methode} · ${esc(abrufName(a.url))} · <span class="fi-abrufe-url">${esc(ziel)}</span> · ${a.ms == null ? '…' : a.ms + ' ms'} · ${a.status ?? '…'}</div>`;
+      }).join('');
+      body.innerHTML = `<div class="fi-abrufe-gruppen">${kopf}</div><div class="fi-abrufe-liste">${liste}</div>`;
+    };
+    let geplant = null;
+    const planeRender = () => { if (geplant) return; geplant = setTimeout(() => { geplant = null; render(); }, 400); };
+    fiAbrufHoerer.add(planeRender);
+    details.addEventListener('toggle', render);
+    render();
+  }
+
   /**
    * Zahlungsplan: geplante Kreditraten aus bank.php (Fälligkeit, Betrag, Tilgung/Zinsen),
    * Monatsgehälter, Restschuld, Kontostand - plus die letzte Gehaltsbuchung aus dem Kontoauszug
@@ -3697,7 +3797,7 @@
    */
   async function fetchZahlungsplan() {
     try {
-      const res = await fetch('/game/bank.php', { credentials: 'same-origin', cache: 'no-store' });
+      const res = await fiFetch('/game/bank.php', { credentials: 'same-origin', cache: 'no-store' });
       if (!res.ok) return null;
       const doc = safeParseHtml(await res.text());
       const zahl = t => parseFloat(t.replace(/\./g, '').replace(',', '.'));
@@ -3715,7 +3815,7 @@
       try {
         const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
         const von = new Date(Date.now() - 120 * 86400000);
-        const r2 = await fetch(`/game/account_statement.php?from=${iso(von)}&to=${iso(new Date())}&category=salary`, { credentials: 'same-origin', cache: 'no-store' });
+        const r2 = await fiFetch(`/game/account_statement.php?from=${iso(von)}&to=${iso(new Date())}&category=salary`, { credentials: 'same-origin', cache: 'no-store' });
         const d2 = safeParseHtml(await r2.text());
         d2.querySelectorAll('tbody tr').forEach(tr => {
           const c = [...tr.children].map(x => x.textContent.replace(/\s+/g, ' ').trim());
@@ -4049,7 +4149,7 @@
     acceptForm.append('job_id', String(jobId));
     acceptForm.append('ajax', '1');
 
-    const acceptRes = await fetch('/game/accept_freight_job.php', {
+    const acceptRes = await fiFetch('/game/accept_freight_job.php', {
       method: 'POST',
       body: acceptForm,
       credentials: 'same-origin',
@@ -4090,7 +4190,7 @@
   // Fehlschlag vollständig rückgängig machen.
 
   async function holePoolOrderIds(vehicleId) {
-    const res = await fetch(`/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}`, { credentials: 'same-origin', cache: 'no-store' });
+    const res = await fiFetch(`/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}`, { credentials: 'same-origin', cache: 'no-store' });
     const doc = safeParseHtml(await res.text());
     return Array.from(doc.querySelectorAll(SELECTORS.ordersPool)).map(c => c.dataset.orderId).filter(Boolean);
   }
@@ -4123,7 +4223,7 @@
 
     // Das Spiel antwortet auch bei Ablehnung mit Redirect + Flash-Meldung
     // (div.flash.error) - Redirect folgen und Meldung lesen.
-    const planRes = await fetch('/game/plan_dispatch_order.php', {
+    const planRes = await fiFetch('/game/plan_dispatch_order.php', {
       method: 'POST',
       body: planForm,
       credentials: 'same-origin',
@@ -4145,7 +4245,7 @@
       return_to: `/game/dispatch.php?date=${new Date().toISOString().slice(0, 10)}&vehicle_id=${vehicleId}`,
       reason: 'Rückgabe aus der Disposition',
     });
-    const res = await fetch('/game/return_dispatch_order_to_market.php', {
+    const res = await fiFetch('/game/return_dispatch_order_to_market.php', {
       method: 'POST', body, credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
     const doc = safeParseHtml(await res.text());
@@ -4158,7 +4258,7 @@
   /** Entfernt eine eingeplante (noch nicht gestartete) Tour wieder aus dem Plan - der Auftrag liegt danach wieder im Pool. */
   async function entferneEingeplanteTour(orderId, vehicleId) {
     const body = new URLSearchParams({ dispatch_action: 'cancel_planned_order', dispatch_order_id: String(orderId), vehicle_id: String(vehicleId) });
-    const res = await fetch('/game/dispatch.php', {
+    const res = await fiFetch('/game/dispatch.php', {
       method: 'POST', body, credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
     const doc = safeParseHtml(await res.text());
@@ -4672,7 +4772,7 @@
     const bekannte = new Set((await idbAlle(db, 'touren')).map(t => String(t.auftragId)));
     let neu = 0;
     for (let seite = 1; seite <= 40; seite++) {
-      const res = await fetch(`/game/inbox.php?filter=dispatch&page=${seite}`, { credentials: 'same-origin', cache: 'no-store' });
+      const res = await fiFetch(`/game/inbox.php?filter=dispatch&page=${seite}`, { credentials: 'same-origin', cache: 'no-store' });
       if (!res.ok) break;
       const doc = safeParseHtml(await res.text());
       const artikel = Array.from(doc.querySelectorAll('article'));
@@ -4743,7 +4843,7 @@
     }
     for (const stueck of stuecke) {
       const pfad = `daten/${geraet}/${new Date(jetzt).toISOString().replace(/[:.]/g, '-')}-${stueck.teil}.json`;
-      const res = await fetch(`https://api.github.com/repos/${SYNC_REPO}/contents/${pfad}`, {
+      const res = await fiFetch(`https://api.github.com/repos/${SYNC_REPO}/contents/${pfad}`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: `sync ${geraet}`, content: utf8ZuBase64(JSON.stringify(stueck)) }),
