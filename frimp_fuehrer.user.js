@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.70
+// @version      0.29.71
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.70';
+  const SCRIPT_VERSION = '0.29.71';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -124,20 +124,54 @@
    */
   const fiAbrufLog = [];
   const fiAbrufHoerer = new Set();
+
+  /**
+   * Nichts doppelt abrufen: identische GET-Adressen desselben Servers innerhalb von 30 s werden
+   * geteilt (laufende oder frische Antwort wird geklont zurückgegeben, kein neuer Seitenaufruf).
+   * Jeder Schreibzugriff (POST: annehmen, einplanen, zurückgeben, Rückruf …) leert den Speicher,
+   * damit danach garantiert frische Daten kommen. Geteilte Treffer zählt `fiAbrufGespart`.
+   */
+  const FI_GET_TTL_MS = 30000;
+  const fiGetSpeicher = new Map(); // url -> {zeit, promise}
+  let fiAbrufGespart = 0;
+  function fiGetSpeicherLeeren() { fiGetSpeicher.clear(); }
+
   async function fiFetch(url, opts) {
+    const methode = String(opts?.method ?? 'GET').toUpperCase();
+    const adresse = String(url);
+    let sameOrigin = true;
+    try { sameOrigin = new URL(adresse, location.origin).origin === location.origin; } catch (e) { /* relativ/ungültig: wie same-origin behandeln */ }
+
+    if (methode === 'GET' && sameOrigin) {
+      const treffer = fiGetSpeicher.get(adresse);
+      if (treffer && Date.now() - treffer.zeit < FI_GET_TTL_MS) {
+        fiAbrufGespart++;
+        fiAbrufHoerer.forEach(f => { try { f(); } catch (e) { /* ignorieren */ } });
+        return (await treffer.promise).clone();
+      }
+    } else if (methode !== 'GET' && !opts?.fiLesend) {
+      fiGetSpeicherLeeren(); // echter Schreibzugriff -> danach frische Daten
+    }
+
     const t0 = performance.now();
-    const eintrag = { start: Date.now(), methode: String(opts?.method ?? 'GET').toUpperCase(), url: String(url), ms: null, status: null };
+    const eintrag = { start: Date.now(), methode, url: adresse, ms: null, status: null };
     fiAbrufLog.push(eintrag);
     if (fiAbrufLog.length > 3000) fiAbrufLog.shift();
+
+    const anfrage = window.fetch(url, opts).then(res => { eintrag.status = res.status; return res; });
+    if (methode === 'GET' && sameOrigin) {
+      fiGetSpeicher.set(adresse, { zeit: Date.now(), promise: anfrage });
+      anfrage.then(res => { if (!res.ok) fiGetSpeicher.delete(adresse); }, () => fiGetSpeicher.delete(adresse));
+    }
     try {
-      const res = await window.fetch(url, opts);
-      eintrag.status = res.status;
-      return res;
+      const res = await anfrage;
+      return methode === 'GET' && sameOrigin ? res.clone() : res;
     } catch (e) {
       eintrag.status = 'Fehler';
       throw e;
     } finally {
       eintrag.ms = Math.round(performance.now() - t0);
+      if (methode !== 'GET' && !opts?.fiLesend) fiGetSpeicherLeeren();
       fiAbrufHoerer.forEach(f => { try { f(); } catch (e) { /* Anzeige darf Abrufe nie stören */ } });
     }
   }
@@ -2048,6 +2082,7 @@
       const datum = `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`;
       const res = await fiFetch('/game/plan_dispatch_order.php', {
         method: 'POST',
+        fiLesend: true, // Probe mit Fantasie-IDs: ändert nichts im Spiel, darf den Abruf-Speicher nicht leeren
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ order_id: '999999999', partial_tour_id: '', vehicle_id: '999999999', planned_start_at: `${datum}T${pad(start.getHours())}:${pad(start.getMinutes())}`, view_date: datum }),
@@ -3378,6 +3413,7 @@
     const returnRadiusInput = { value: '0' };
 
     async function routenBerechnen(erzwingeNeuladen) {
+      if (erzwingeNeuladen) fiGetSpeicherLeeren(); // 🔄 = wirklich frisch laden
       const bodyType = bodyTypeSelect.value;
       if (!bodyType) {
         resultsEl.innerHTML = '<div class="fi-empty">Bitte zuerst eine Kategorie wählen.</div>';
@@ -3551,6 +3587,7 @@
         return;
       }
       const trocken = document.getElementById('fi-dash-autofill-dry').checked;
+      fiGetSpeicherLeeren(); // Befüllen startet immer mit frischen Daten
 
       autofillLaeuft = true;
       autofillAbbruch = false;
@@ -3763,7 +3800,7 @@
       let aktiv = 0, ende = -Infinity, anfang = 0;
       iv.forEach(([a, b]) => { if (a > ende) { aktiv += ende - anfang > 0 ? ende - anfang : 0; anfang = a; ende = b; } else if (b > ende) ende = b; });
       if (ende > anfang) aktiv += ende - anfang;
-      summary.textContent = `🔎 ${fiAbrufLog.length.toLocaleString('de-DE')} Seiten aufgerufen in ${zeit(Math.round(aktiv))}`;
+      summary.textContent = `🔎 ${fiAbrufLog.length.toLocaleString('de-DE')} Seiten aufgerufen in ${zeit(Math.round(aktiv))}${fiAbrufGespart ? ` · ${fiAbrufGespart} doppelte gespart` : ''}`;
       if (!details.open) return;
       const gruppen = new Map();
       fiAbrufLog.forEach(a => {
