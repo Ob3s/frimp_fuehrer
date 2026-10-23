@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.83
+// @version      0.29.84
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.83';
+  const SCRIPT_VERSION = '0.29.84';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -5286,6 +5286,7 @@
     { kat: 'Fuhrpark', icon: '🏭', name: 'Fuhrpark-Imperium', rar: 'epic', pkt: 180, desc: '100 Fahrzeuge stehen im Fuhrpark.', m: 'fahrzeuge', ziel: 100 },
     { kat: 'Profil & Auftreten', icon: '🏢', name: 'Profil gestartet', rar: 'common', pkt: 5, desc: 'Die eigene Firmenseite wurde angelegt.', m: 'immer', ziel: 1 },
     { kat: 'Profil & Auftreten', icon: '📝', name: 'Werbetafel', rar: 'common', pkt: 10, desc: 'Ein eigener Werbetext wurde im Spielerprofil hinterlegt.', m: null },
+    { kat: 'Profil & Auftreten', icon: '⭐', name: 'Premium-Auftritt', rar: 'rare', pkt: 25, desc: 'Ein Premium-Spielerprofil wurde aktiviert (nur mit Premium).', m: null },
     { kat: 'Profil & Auftreten', icon: '🛡️', name: 'Markenauftritt', rar: 'rare', pkt: 20, desc: 'Ein eigenes Firmenlogo wurde ausgewählt.', m: null },
     { kat: 'Profil & Auftreten', icon: '🎯', name: 'Spezialist', rar: 'rare', pkt: 25, desc: 'Eine Speditions-Spezialisierung wurde gewählt.', m: null },
     { kat: 'Profil & Auftreten', icon: '🚛', name: 'Fuhrpark-Schaufenster', rar: 'rare', pkt: 25, desc: 'Mindestens ein Top-Fahrzeug wurde im Profil präsentiert.', m: null },
