@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.81
+// @version      0.29.82
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.81';
+  const SCRIPT_VERSION = '0.29.82';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2693,7 +2693,7 @@
       if (!el) { if (aktivEl) verstecke(); return; }
       if (aktivEl === el) { verstecke(); return; } // zweites Tippen: Aktion/Link ausführen lassen
       // erstes Tippen: nur Info zeigen, Link/Knopf noch nicht auslösen
-      if (el.closest('a, button')) { ev.preventDefault(); ev.stopImmediatePropagation(); }
+      if (ev.target.closest('a, button')) { ev.preventDefault(); ev.stopImmediatePropagation(); }
       zeige(el);
     }, true);
   }
@@ -4635,6 +4635,8 @@
     const karten = Array.from(document.querySelectorAll(PERSONALBOERSE_SELEKTOREN.karte));
     if (!karten.length) return;
     injectPersonalboerseStyles();
+    injectZIndexOverrides(); // enthält auch die Tooltip-Box-Styles
+    initFiTooltipSystem();   // Tooltips (Hover am PC, Tippen am Handy)
 
     const aktuellesBueroLevel = holeAktuellesBueroLevel();
     const kandidaten = karten.map(parsePersonalKarte).map(k => ({
@@ -4646,7 +4648,7 @@
     kandidaten.forEach(k => {
       const badge = document.createElement('div');
       badge.className = 'fi-personal-wert' + (k.gesperrt ? ' fi-gesperrt' : '');
-      badge.title = 'Zuverlässigkeit (früher: Eignung) in Prozentpunkten pro 1.000 € Monatsgehalt - hoher Wert = viel für wenig Gehalt';
+      badge.setAttribute('data-fi-tip', 'Zuverlässigkeit (früher: Eignung) in Prozentpunkten pro 1.000 € Monatsgehalt - hoher Wert = viel für wenig Gehalt');
       badge.textContent = k.wert != null ? `⭐ ${k.wert.toFixed(1)} ` : '⭐ –';
       const small = document.createElement('small');
       small.textContent = k.gesperrt ? `🔒 ab Büro-Level ${k.freischaltungLevel}` : '/ 1.000 € Gehalt';
