@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.82
+// @version      0.29.83
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.82';
+  const SCRIPT_VERSION = '0.29.83';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -5258,6 +5258,129 @@
   }
 
   // ============================================================
+  // ACHIEVEMENT-WAND (player-profile.php, eigenes Profil)
+  // ============================================================
+  /**
+   * Das Spiel zeigt die "Große Achievement-Wand" nur mit Premium; ohne steht dort "Noch keine Erfolge
+   * freigeschaltet". Diese Wand wird LOKAL aus den eigenen Spieldaten berechnet (Touren, Umsatz, Personal,
+   * Firmenlevel, Fahrzeuge) - es sind NICHT die Spiel-Achievements: keine Punkte im Spiel, für andere
+   * Spieler unsichtbar. Katalog (Namen, Schwellen, Seltenheit, Punkte) nach den Wänden öffentlich
+   * sichtbarer Premium-Profile; Erfolge ohne lokal prüfbare Daten (Logo, Spezialisierung, Rangliste …)
+   * stehen als "nicht prüfbar" da.
+   */
+  const ACHIEVEMENT_KATALOG = [
+    { kat: 'Transport', icon: '🚚', name: 'Erste Lieferung', rar: 'common', pkt: 10, desc: 'Die erste Fracht wurde erfolgreich abgeschlossen.', m: 'fracht', ziel: 1 },
+    { kat: 'Transport', icon: '🚚', name: 'Zuverlässiger Frachtführer', rar: 'common', pkt: 20, desc: '10 Frachten wurden erfolgreich abgeschlossen.', m: 'fracht', ziel: 10 },
+    { kat: 'Transport', icon: '🏆', name: 'Stammfahrer der Wirtschaft', rar: 'rare', pkt: 60, desc: '100 Frachten wurden erfolgreich abgeschlossen.', m: 'fracht', ziel: 100 },
+    { kat: 'Transport', icon: '👑', name: 'Logistik-Legende', rar: 'legendary', pkt: 250, desc: '1.000 Frachten wurden erfolgreich abgeschlossen.', m: 'fracht', ziel: 1000 },
+    { kat: 'Personal', icon: '👤', name: 'Erster Mitarbeiter', rar: 'common', pkt: 10, desc: 'Der erste Mitarbeiter wurde eingestellt.', m: 'personal', ziel: 1 },
+    { kat: 'Personal', icon: '👥', name: 'Personalabteilung', rar: 'rare', pkt: 60, desc: '10 Mitarbeiter arbeiten für die Firma.', m: 'personal', ziel: 10 },
+    { kat: 'Wirtschaft', icon: '💶', name: 'Sechsstellig', rar: 'common', pkt: 25, desc: '100.000 € Gesamtumsatz wurden erreicht.', m: 'umsatz', ziel: 100000 },
+    { kat: 'Wirtschaft', icon: '💰', name: 'Millionärs-Spedition', rar: 'rare', pkt: 100, desc: '1.000.000 € Gesamtumsatz wurden erreicht.', m: 'umsatz', ziel: 1000000 },
+    { kat: 'Wirtschaft', icon: '💎', name: 'Marktmacht', rar: 'epic', pkt: 220, desc: '10.000.000 € Gesamtumsatz wurden erreicht.', m: 'umsatz', ziel: 10000000 },
+    { kat: 'Firma', icon: '🏗️', name: 'Wachsende Firma', rar: 'common', pkt: 30, desc: 'Firmenlevel 5 wurde erreicht.', m: 'level', ziel: 5 },
+    { kat: 'Firma', icon: '🏢', name: 'Etablierter Betrieb', rar: 'rare', pkt: 90, desc: 'Firmenlevel 10 wurde erreicht.', m: 'level', ziel: 10 },
+    { kat: 'Fuhrpark', icon: '🚛', name: 'Erstes Fahrzeug', rar: 'common', pkt: 10, desc: 'Das erste Fahrzeug steht im Fuhrpark.', m: 'fahrzeuge', ziel: 1 },
+    { kat: 'Fuhrpark', icon: '🚛', name: 'Kleine Flotte', rar: 'common', pkt: 25, desc: '5 Fahrzeuge stehen im Fuhrpark.', m: 'fahrzeuge', ziel: 5 },
+    { kat: 'Fuhrpark', icon: '🚛', name: 'Flottenbetreiber', rar: 'rare', pkt: 80, desc: '25 Fahrzeuge stehen im Fuhrpark.', m: 'fahrzeuge', ziel: 25 },
+    { kat: 'Fuhrpark', icon: '🏭', name: 'Fuhrpark-Imperium', rar: 'epic', pkt: 180, desc: '100 Fahrzeuge stehen im Fuhrpark.', m: 'fahrzeuge', ziel: 100 },
+    { kat: 'Profil & Auftreten', icon: '🏢', name: 'Profil gestartet', rar: 'common', pkt: 5, desc: 'Die eigene Firmenseite wurde angelegt.', m: 'immer', ziel: 1 },
+    { kat: 'Profil & Auftreten', icon: '📝', name: 'Werbetafel', rar: 'common', pkt: 10, desc: 'Ein eigener Werbetext wurde im Spielerprofil hinterlegt.', m: null },
+    { kat: 'Profil & Auftreten', icon: '🛡️', name: 'Markenauftritt', rar: 'rare', pkt: 20, desc: 'Ein eigenes Firmenlogo wurde ausgewählt.', m: null },
+    { kat: 'Profil & Auftreten', icon: '🎯', name: 'Spezialist', rar: 'rare', pkt: 25, desc: 'Eine Speditions-Spezialisierung wurde gewählt.', m: null },
+    { kat: 'Profil & Auftreten', icon: '🚛', name: 'Fuhrpark-Schaufenster', rar: 'rare', pkt: 25, desc: 'Mindestens ein Top-Fahrzeug wurde im Profil präsentiert.', m: null },
+    { kat: 'Prestige', icon: '🥇', name: 'Ranglisten-Elite', rar: 'epic', pkt: 200, desc: 'Die Firma steht in den Top 10 der Rangliste.', m: null },
+    { kat: 'Prestige', icon: '🏁', name: '1.000 Frachten', rar: 'common', pkt: 0, desc: '1.000 Frachten erfolgreich abgeschlossen.', m: 'fracht', ziel: 1000 },
+    { kat: 'Prestige', icon: '📈', name: '1 Mio. Jahresumsatz', rar: 'common', pkt: 0, desc: '1.000.000 Euro Umsatz im laufenden Jahr erreicht.', m: 'jahresumsatz', ziel: 1000000 },
+    { kat: 'Prestige', icon: '🚚', name: '50 Fahrzeuge', rar: 'common', pkt: 0, desc: '50 aktive Fahrzeuge im Fuhrpark.', m: 'fahrzeuge', ziel: 50 },
+  ];
+
+  /** Umsatz = Summe aller Tourgutschriften (Kontoauszug, Kategorie "orders"); ab = Startdatum ISO (Standard: Spielbeginn). 30 Min. gecached. */
+  async function ladeTourUmsatz(abIso) {
+    const schluessel = `fi_umsatz_${abIso}`;
+    try {
+      const c = JSON.parse(window.localStorage.getItem(schluessel) || 'null');
+      if (c && Date.now() - c.zeit < 30 * 60 * 1000) return c.summe;
+    } catch (e) { /* ohne Cache weiter */ }
+    const heute = new Date();
+    const bis = `${heute.getFullYear()}-${String(heute.getMonth() + 1).padStart(2, '0')}-${String(heute.getDate()).padStart(2, '0')}`;
+    let summe = 0;
+    for (let seite = 1; seite <= 200; seite++) {
+      const res = await fiFetch(`/game/account_statement.php?from=${abIso}&to=${bis}&category=orders&page=${seite}`, { credentials: 'same-origin', cache: 'no-store' });
+      const doc = safeParseHtml(await res.text());
+      doc.querySelectorAll('tbody tr').forEach(tr => {
+        const c = [...tr.children].map(x => x.textContent.replace(/\s+/g, ' ').trim());
+        const betrag = parseFloat((c[4] ?? '').replace(/\./g, '').replace(',', '.').replace(/[^\d.\-]/g, ''));
+        if (c[1] && Number.isFinite(betrag) && betrag > 0) summe += betrag;
+      });
+      const pg = /Seite\s+(\d+)\s*\/\s*(\d+)/.exec(doc.body?.textContent ?? '');
+      if (!pg || +pg[1] >= +pg[2]) break;
+    }
+    try { window.localStorage.setItem(schluessel, JSON.stringify({ zeit: Date.now(), summe })); } catch (e) { /* egal */ }
+    return summe;
+  }
+
+  async function baueAchievementWand() {
+    if (document.getElementById('fi-ach-wand')) return;
+    if (!document.querySelector('a[href*="profile-settings.php"]')) return; // nur das eigene Profil
+    const leer = [...document.querySelectorAll('section.panel')].find(sec => /Achievement-Übersicht/.test(sec.querySelector('h2')?.textContent ?? ''));
+    if (!leer) return; // Premium-Wand des Spiels vorhanden -> nichts ersetzen
+
+    const jahr = new Date().getFullYear();
+    const stat = parseStatBadges();
+    const fraRes = await fiFetch('/game/active_tours.php', { credentials: 'same-origin', cache: 'no-store' });
+    const fraDoc = safeParseHtml(await fraRes.text());
+    const fracht = parseInt(/Erfüllte Touren\s*(\d+)/i.exec((fraDoc.body?.textContent ?? '').replace(/\s+/g, ' '))?.[1] ?? '0', 10);
+    const [umsatz, jahresumsatz] = await Promise.all([ladeTourUmsatz('2024-01-01'), ladeTourUmsatz(`${jahr}-01-01`)]);
+    const messwerte = { fracht, personal: stat.Personal ?? 0, level: parseInt(document.querySelector('.fi-level-badge strong')?.textContent ?? '0', 10) || 0, fahrzeuge: stat.Fahrzeuge ?? 0, umsatz, jahresumsatz, immer: 1 };
+
+    const nf = n => Math.round(n).toLocaleString('de-DE');
+    const eintraege = ACHIEVEMENT_KATALOG.map(a => {
+      const pruefbar = !!a.m;
+      const wert = pruefbar ? messwerte[a.m] : null;
+      return { ...a, pruefbar, wert, offen: pruefbar && wert >= a.ziel };
+    });
+    const freigeschaltet = eintraege.filter(e => e.offen);
+    const punkte = freigeschaltet.reduce((a, e) => a + e.pkt, 0);
+    const kategorien = [...new Set(eintraege.map(e => e.kat))];
+
+    const html = `
+      <h2>Große Achievement-Wand <small style="font-size:12px; font-weight:600; color:#9aa5b8;">lokal berechnet · ${freigeschaltet.length} von ${eintraege.length} · ${punkte} Punkte</small></h2>
+      <div class="desc" style="margin-bottom:10px;">Nur auf diesem Gerät aus deinen Spieldaten errechnet - keine echten Spiel-Achievements (keine Punkte im Spiel, für andere Spieler nicht sichtbar).</div>
+      <div class="achievement-categories">
+        ${kategorien.map(k => `<div class="achievement-category"><h3>${k}</h3><div class="achievements">
+          ${eintraege.filter(e => e.kat === k).map(e => {
+            const pct = e.pruefbar ? Math.min(100, (e.wert / e.ziel) * 100) : 0;
+            return `<article class="achievement ${e.offen ? 'unlocked' : 'locked'} rarity-${e.rar}">
+              <span class="achievement-rarity">${e.rar}</span><div class="achievement-logo">${e.icon}</div><strong>${e.name}</strong>
+              <small>${!e.pruefbar ? 'nicht prüfbar' : (e.offen ? 'Freigeschaltet' : 'Gesperrt')}${e.pkt ? ` · ${e.pkt} Punkte` : ''}</small>
+              ${e.pruefbar && e.ziel > 1 ? `<div class="achievement-progress" style="--p:${pct.toFixed(1)}%"><i></i></div><div class="achievement-progress-text">${nf(Math.min(e.wert, e.ziel))} / ${nf(e.ziel)}</div>` : ''}
+              <div class="fi-ach-desc">${e.desc}</div>
+            </article>`;
+          }).join('')}
+        </div></div>`).join('')}
+      </div>`;
+
+    const wand = document.createElement('section');
+    wand.className = 'panel';
+    wand.id = 'fi-ach-wand';
+    wand.innerHTML = html;
+    const style = document.createElement('style');
+    style.textContent = `
+      #fi-ach-wand .achievements { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+      #fi-ach-wand .achievement { position: relative; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.05); }
+      #fi-ach-wand .achievement.locked { opacity: .55; }
+      #fi-ach-wand .achievement-progress { height: 5px; border-radius: 3px; background: rgba(255,255,255,.10); overflow: hidden; margin-top: 6px; }
+      #fi-ach-wand .achievement-progress > i { display: block; height: 100%; width: var(--p, 0%); background: linear-gradient(90deg, #f5b84b, #ffd98a); }
+      #fi-ach-wand .achievement-progress-text { font-size: 11px; color: #9aa5b8; margin-top: 2px; }
+      #fi-ach-wand .achievement strong, #fi-ach-wand .achievement small { display: block; }
+      #fi-ach-wand .fi-ach-desc { font-size: 11px; color: #9aa5b8; margin-top: 4px; line-height: 1.35; }
+    `;
+    document.head.appendChild(style);
+    leer.replaceWith(wand);
+  }
+
+  // ============================================================
   // 7. INIT
   // ============================================================
   // Der Helper läuft AUSSCHLIESSLICH als Cockpit auf active_tours.php -
@@ -5274,7 +5397,8 @@
   } else if (/\/game\/truck-catalog\.php/.test(location.pathname)) {
     ergaenzeFehlendeFahrzeuge();
   } else if (/\/game\/fuhrpark\.php/.test(location.pathname)) {
-    try { baueFuhrparkListe(); } catch (e) { console.error('[FI-Helper] Fuhrpark-Liste fehlgeschlagen', e); }
+    try { baueFuhrparkListe(); } catch (e) { console.error('[FI-Helper] Fuhrpark-Liste fehlgeschlagen', e); }  } else if (/\/game\/player-profile\.php/.test(location.pathname)) {
+    baueAchievementWand().catch(e => console.error('[FI-Helper] Achievement-Wand fehlgeschlagen', e));
   }
 
   // Datensammler auf jeder eingeloggten Spielseite (verzögert, damit die Seite
