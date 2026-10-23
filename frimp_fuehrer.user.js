@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.84
+// @version      0.29.85
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.84';
+  const SCRIPT_VERSION = '0.29.85';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -5285,10 +5285,10 @@
     { kat: 'Fuhrpark', icon: '🚛', name: 'Flottenbetreiber', rar: 'rare', pkt: 80, desc: '25 Fahrzeuge stehen im Fuhrpark.', m: 'fahrzeuge', ziel: 25 },
     { kat: 'Fuhrpark', icon: '🏭', name: 'Fuhrpark-Imperium', rar: 'epic', pkt: 180, desc: '100 Fahrzeuge stehen im Fuhrpark.', m: 'fahrzeuge', ziel: 100 },
     { kat: 'Profil & Auftreten', icon: '🏢', name: 'Profil gestartet', rar: 'common', pkt: 5, desc: 'Die eigene Firmenseite wurde angelegt.', m: 'immer', ziel: 1 },
-    { kat: 'Profil & Auftreten', icon: '📝', name: 'Werbetafel', rar: 'common', pkt: 10, desc: 'Ein eigener Werbetext wurde im Spielerprofil hinterlegt.', m: null },
+    { kat: 'Profil & Auftreten', icon: '📝', name: 'Werbetafel', rar: 'common', pkt: 10, desc: 'Ein eigener Werbetext wurde im Spielerprofil hinterlegt.', m: 'werbetext', ziel: 1 },
     { kat: 'Profil & Auftreten', icon: '⭐', name: 'Premium-Auftritt', rar: 'rare', pkt: 25, desc: 'Ein Premium-Spielerprofil wurde aktiviert (nur mit Premium).', m: null },
-    { kat: 'Profil & Auftreten', icon: '🛡️', name: 'Markenauftritt', rar: 'rare', pkt: 20, desc: 'Ein eigenes Firmenlogo wurde ausgewählt.', m: null },
-    { kat: 'Profil & Auftreten', icon: '🎯', name: 'Spezialist', rar: 'rare', pkt: 25, desc: 'Eine Speditions-Spezialisierung wurde gewählt.', m: null },
+    { kat: 'Profil & Auftreten', icon: '🛡️', name: 'Markenauftritt', rar: 'rare', pkt: 20, desc: 'Ein eigenes Firmenlogo wurde ausgewählt.', m: 'logo', ziel: 1 },
+    { kat: 'Profil & Auftreten', icon: '🎯', name: 'Spezialist', rar: 'rare', pkt: 25, desc: 'Eine Speditions-Spezialisierung wurde gewählt.', m: 'spezialisierung', ziel: 1 },
     { kat: 'Profil & Auftreten', icon: '🚛', name: 'Fuhrpark-Schaufenster', rar: 'rare', pkt: 25, desc: 'Mindestens ein Top-Fahrzeug wurde im Profil präsentiert.', m: null },
     { kat: 'Prestige', icon: '🥇', name: 'Ranglisten-Elite', rar: 'epic', pkt: 200, desc: 'Die Firma steht in den Top 10 der Rangliste.', m: null },
     { kat: 'Prestige', icon: '🏁', name: '1.000 Frachten', rar: 'common', pkt: 0, desc: '1.000 Frachten erfolgreich abgeschlossen.', m: 'fracht', ziel: 1000 },
@@ -5329,11 +5329,26 @@
 
     const jahr = new Date().getFullYear();
     const stat = parseStatBadges();
-    const fraRes = await fiFetch('/game/active_tours.php', { credentials: 'same-origin', cache: 'no-store' });
-    const fraDoc = safeParseHtml(await fraRes.text());
-    const fracht = parseInt(/Erfüllte Touren\s*(\d+)/i.exec((fraDoc.body?.textContent ?? '').replace(/\s+/g, ' '))?.[1] ?? '0', 10);
-    const [umsatz, jahresumsatz] = await Promise.all([ladeTourUmsatz('2024-01-01'), ladeTourUmsatz(`${jahr}-01-01`)]);
-    const messwerte = { fracht, personal: stat.Personal ?? 0, level: parseInt(document.querySelector('.fi-level-badge strong')?.textContent ?? '0', 10) || 0, fahrzeuge: stat.Fahrzeuge ?? 0, umsatz, jahresumsatz, immer: 1 };
+    // Das Profil zeigt Frachten, Gesamt-/Jahresumsatz selbst (Kennzahlen) - nur falls ausgeblendet: aus Spieldaten berechnen
+    const seitenText = (document.querySelector('main') ?? document.body).textContent.replace(/\s+/g, ' ');
+    const zahl = re => { const m = re.exec(seitenText); return m ? parseFloat(m[1].replace(/\./g, '').replace(',', '.')) : null; };
+    let fracht = zahl(/Frachten\s*([\d.]+)/);
+    if (fracht == null) {
+      const fraRes = await fiFetch('/game/active_tours.php', { credentials: 'same-origin', cache: 'no-store' });
+      const fraDoc = safeParseHtml(await fraRes.text());
+      fracht = parseInt(/Erfüllte Touren\s*(\d+)/i.exec((fraDoc.body?.textContent ?? '').replace(/\s+/g, ' '))?.[1] ?? '0', 10);
+    }
+    const umsatz = zahl(/Gesamtumsatz\s*([\d.,]+)\s*€/) ?? await ladeTourUmsatz('2024-01-01');
+    const jahresumsatz = zahl(/Jahresumsatz\s*([\d.,]+)\s*€/) ?? await ladeTourUmsatz(`${jahr}-01-01`);
+    const messwerte = {
+      fracht, umsatz, jahresumsatz, immer: 1,
+      personal: stat.Personal ?? 0,
+      level: parseInt(document.querySelector('.fi-level-badge strong')?.textContent ?? '0', 10) || 0,
+      fahrzeuge: stat.Fahrzeuge ?? 0,
+      spezialisierung: /Keine Spezialisierung/i.test(seitenText) ? 0 : 1,
+      werbetext: /noch keine öffentliche Firmenbeschreibung/i.test(seitenText) ? 0 : 1,
+      logo: /fi-status-logo\.png/.test(document.querySelector('main .logo, .hero .logo')?.getAttribute('src') ?? '') ? 0 : 1,
+    };
 
     const nf = n => Math.round(n).toLocaleString('de-DE');
     const eintraege = ACHIEVEMENT_KATALOG.map(a => {
@@ -5381,6 +5396,17 @@
     leer.replaceWith(wand);
   }
 
+  /** Abruf-Zeile ("🔎 N Seiten aufgerufen in X ms") ganz unten auf jeder Seite, die das Skript verändert (das Dashboard hat sie im eigenen Template). */
+  function zeigeAbrufZeileUnten() {
+    if (document.getElementById('fi-dash-abrufe')) { starteAbrufAnzeige(); return; }
+    injectZIndexOverrides(); // Styles der Abruf-Zeile
+    const wrap = document.createElement('div');
+    wrap.id = 'fi-dash-abrufe';
+    wrap.style.cssText = 'margin: 16px auto 28px; max-width: 1100px; padding: 0 16px;';
+    (document.querySelector('main') || document.querySelector('.content') || document.body).appendChild(wrap);
+    starteAbrufAnzeige();
+  }
+
   // ============================================================
   // 7. INIT
   // ============================================================
@@ -5398,8 +5424,13 @@
   } else if (/\/game\/truck-catalog\.php/.test(location.pathname)) {
     ergaenzeFehlendeFahrzeuge();
   } else if (/\/game\/fuhrpark\.php/.test(location.pathname)) {
-    try { baueFuhrparkListe(); } catch (e) { console.error('[FI-Helper] Fuhrpark-Liste fehlgeschlagen', e); }  } else if (/\/game\/player-profile\.php/.test(location.pathname)) {
+    try { baueFuhrparkListe(); } catch (e) { console.error('[FI-Helper] Fuhrpark-Liste fehlgeschlagen', e); }
+  } else if (/\/game\/player-profile\.php/.test(location.pathname)) {
     baueAchievementWand().catch(e => console.error('[FI-Helper] Achievement-Wand fehlgeschlagen', e));
+  }
+  // Auf jeder manipulierten Seite: Abruf-Zeile ganz unten
+  if (/\/game\/(recruitment|truck-catalog|fuhrpark|player-profile)\.php/.test(location.pathname)) {
+    try { zeigeAbrufZeileUnten(); } catch (e) { console.error('[FI-Helper] Abruf-Zeile fehlgeschlagen', e); }
   }
 
   // Datensammler auf jeder eingeloggten Spielseite (verzögert, damit die Seite
