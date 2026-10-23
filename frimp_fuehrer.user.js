@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.77
+// @version      0.29.78
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.77';
+  const SCRIPT_VERSION = '0.29.78';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3125,7 +3125,7 @@
       // Info-Feld: Chips (Warnungen/Urlaubsantrag) füllt aktualisiereFlotte(); hier nur der Sync-Knopf
       const kopfEl = document.getElementById('fi-dash-header');
       if (!kopfEl) return;
-      kopfEl.innerHTML = `<span id="fi-info-chips" style="display:contents;"></span><button type="button" id="fi-sync-pill" class="fi-dash-pill is-muted" style="cursor:pointer;" title="Mitschnitt in privates GitHub-Repo hochladen (PC und Handy zusammen auswerten)">${syncPillText()}</button>`;
+      kopfEl.innerHTML = `<span id="fi-einnahmen" style="display:contents;"></span><span id="fi-info-chips" style="display:contents;"></span><button type="button" id="fi-sync-pill" class="fi-dash-pill is-muted" style="cursor:pointer;" title="Mitschnitt in privates GitHub-Repo hochladen (PC und Handy zusammen auswerten)">${syncPillText()}</button>`;
       kopfEl.querySelector('#fi-sync-pill')?.addEventListener('click', () => { bedienSyncPill().catch(e => window.alert(`Sync: ${e.message}`)); });
     }
     await aktualisiereKopf();
@@ -3256,7 +3256,23 @@
       // Hauptuntersuchung + Verschleiß gegen die echten Mindestwerte der Prüfstelle:
       // HU-Chip nur bei Fälligkeit in <= 60 Tagen (orange), <= 30 Tage / überfällig (rot);
       // Verschleiß-Chip nur wenn ein Bauteil <= 10 Prozentpunkte über dem Mindestwert liegt (<= 0: defekt).
-      const [pruef, kmProTag] = await Promise.all([fetchPruefstand(), fetchKmProTag()]);
+      const [pruef, kmProTag, tourRatenMap] = await Promise.all([fetchPruefstand(), fetchKmProTag(), fetchTourRaten()]);
+
+      // Erwartete Einnahmen (oberste Zeile): netto, bis zum Ende der eingeplanten Touren
+      const einnahmenEl = document.getElementById('fi-einnahmen');
+      if (einnahmenEl) {
+        const ee = berechneErwarteteEinnahmen(fleet, tourRatenMap);
+        if (ee.touren) {
+          const eurK = x => `${Math.round(x).toLocaleString('de-DE')} €`;
+          const sortiert = [...ee.tage.entries()].sort((a, b) => a[1].datum - b[1].datum);
+          const letzter = sortiert[sortiert.length - 1][0];
+          const zeilen = sortiert.map(([k, t]) => `${t.datum.toLocaleDateString('de-DE', { weekday: 'short' })} ${k} · +${eurK(t.netto)} netto (${eurK(t.brutto)} brutto, ${t.touren} Tour${t.touren > 1 ? 'en' : ''})`);
+          zeilen.push('Geschätzt: Strecke × Ø-€/km je Fahrzeug (7 Tage) abzüglich Maut/Diesel.', 'Nur bereits eingeplante Touren (Planungsfenster).');
+          einnahmenEl.innerHTML = `<span class="fi-dash-pill is-positive" data-fi-tip="${tipText(zeilen.join('\n'))}">💶 +${eurK(ee.netto)} bis ${letzter}</span>`;
+        } else {
+          einnahmenEl.innerHTML = '';
+        }
+      }
       if (pruef?.length) {
         const jetztMs = Date.now();
         const maxKmTag = kmProTag && kmProTag.size ? Math.max(...kmProTag.values()) : 1200;
@@ -3754,11 +3770,19 @@
    * @returns {Promise<Map<string, number>|null>} Fahrzeugname ("GE 05") -> km/Tag
    */
   let kmProTagCache = null;
+  let tourRaten = new Map(); // Fahrzeugname -> {last, brutto, ergebnis, bruttoMitErgebnis} (7 Tage)
+  /** €/Lastkm und Netto-Quote je Fahrzeug aus den Tourmeldungen der letzten 7 Tage (gemeinsamer Abruf mit km/Tag). */
+  async function fetchTourRaten() {
+    await fetchKmProTag();
+    return tourRaten;
+  }
   async function fetchKmProTag() {
     if (kmProTagCache && Date.now() - kmProTagCache.zeit < 20 * 60 * 1000) return kmProTagCache.daten;
     try {
       const grenze = Date.now() - 7 * 86400000;
       const summe = new Map();
+      const raten = new Map();
+      const zahl = t => parseFloat(t.replace(/\./g, '').replace(',', '.'));
       let weiter = true;
       for (let seite = 1; seite <= 8 && weiter; seite++) {
         const res = await fiFetch(`/game/inbox.php?filter=dispatch&page=${seite}`, { credentials: 'same-origin', cache: 'no-store' });
@@ -3774,10 +3798,21 @@
           const fz = /Gefahren mit:\s*(\S+ \d+)\s*·/.exec(t);
           const km = /Gesamtstrecke:\s*(\d+) km/.exec(t);
           if (fz && km) summe.set(fz[1], (summe.get(fz[1]) ?? 0) + +km[1]);
+          const lk = /Lastfahrt:\s*(\d+) km/.exec(t);
+          const br = /Frachtverguetung brutto:\s*([\d.,]+) €/.exec(t);
+          const erg = /Ergebnis nach Diesel und Maut:\s*(-?[\d.,]+) €/.exec(t);
+          if (fz && lk && br && zahl(br[1]) > 0) {
+            const r = raten.get(fz[1]) ?? { last: 0, brutto: 0, ergebnis: 0, bruttoMitErgebnis: 0 };
+            r.last += +lk[1];
+            r.brutto += zahl(br[1]);
+            if (erg) { r.ergebnis += zahl(erg[1]); r.bruttoMitErgebnis += zahl(br[1]); }
+            raten.set(fz[1], r);
+          }
         });
       }
       const daten = new Map([...summe.entries()].map(([k, v]) => [k, v / 7]));
       kmProTagCache = { zeit: Date.now(), daten };
+      tourRaten = raten;
       return daten;
     } catch (e) {
       console.warn('[FI-Helper] km/Tag konnten nicht ermittelt werden', e);
@@ -3843,6 +3878,47 @@
     fiAbrufHoerer.add(planeRender);
     details.addEventListener('toggle', render);
     render();
+  }
+
+  /**
+   * Erwartete Einnahmen aus den bereits eingeplanten Touren: Jede Entladung (Phase "entladen") in der
+   * Zukunft schließt einen Auftrag ab; gutgeschrieben wird zum Entladeende. Route = letzte
+   * "Fahrt beladen"-Phase desselben Auftrags davor; Vergütung = Strecke (Spiel-Formel) x Ø-€/Lastkm
+   * des Fahrzeugs (7 Tage, sonst Flottenschnitt); netto = brutto x Ø-Quote nach Diesel und Maut.
+   * @returns {{tage: Map<string, {brutto: number, netto: number, touren: number, datum: Date}>, brutto: number, netto: number, touren: number}}
+   */
+  function berechneErwarteteEinnahmen(fleet, raten) {
+    const gesamt = [...raten.values()].reduce((a, r) => ({ last: a.last + r.last, brutto: a.brutto + r.brutto, erg: a.erg + r.ergebnis, bm: a.bm + r.bruttoMitErgebnis }), { last: 0, brutto: 0, erg: 0, bm: 0 });
+    const schnittRate = gesamt.last > 0 ? gesamt.brutto / gesamt.last : null;
+    const schnittQuote = gesamt.bm > 0 ? gesamt.erg / gesamt.bm : 0.9;
+    const jetzt = Date.now();
+    const tage = new Map();
+    let brutto = 0, netto = 0, touren = 0;
+    fleet.forEach(entry => {
+      const kurz = entry.name.split(' · ')[0];
+      const r = raten.get(kurz);
+      const rate = r && r.last > 0 ? r.brutto / r.last : schnittRate;
+      const quote = r && r.bruttoMitErgebnis > 0 ? r.ergebnis / r.bruttoMitErgebnis : schnittQuote;
+      if (!rate) return;
+      const phasen = [...(entry.status?.phasen ?? [])].filter(p => p.start && p.ende).sort((a, b) => a.start - b.start);
+      phasen.forEach((p, i) => {
+        if (p.type !== 'entladen' || p.ende.getTime() <= jetzt) return;
+        let route = null;
+        for (let j = i - 1; j >= 0 && !route; j--) {
+          if (phasen[j].type === 'fahrt_beladen' && phasen[j].auftrag === p.auftrag && phasen[j].von && phasen[j].bis) route = phasen[j];
+        }
+        const km = route ? geschaetzteStrassenKm(route.von, route.bis) : null;
+        if (!km) return;
+        const b = km * rate;
+        const n = b * quote;
+        const schluessel = p.ende.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+        const tag = tage.get(schluessel) ?? { brutto: 0, netto: 0, touren: 0, datum: p.ende };
+        tag.brutto += b; tag.netto += n; tag.touren++;
+        tage.set(schluessel, tag);
+        brutto += b; netto += n; touren++;
+      });
+    });
+    return { tage, brutto, netto, touren };
   }
 
   /**
