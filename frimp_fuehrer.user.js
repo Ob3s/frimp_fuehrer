@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.72
+// @version      0.29.73
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.72';
+  const SCRIPT_VERSION = '0.29.73';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3126,7 +3126,9 @@
     await aktualisiereKopf();
     starteAbrufAnzeige();
 
-    // --- Mini-Übersicht: nächste Kreditraten (je Tag gebündelt) + Gehälter ---
+    // --- Mini-Übersicht: Kreditraten (je Tag gebündelt) + Gehalt, nur 7 Tage vorher ---
+    // Reicht das Geld nicht, wird genau die Zahlung rot markiert, die nicht mehr gedeckt ist:
+    // der Kontostand wird der Reihe nach (nach Fälligkeit) belastet; was noch passt, bleibt normal.
     async function aktualisiereZahlungen() {
       const el = document.getElementById('fi-dash-zahlungen');
       if (!el) return;
@@ -3134,45 +3136,58 @@
       if (!z) return;
       const jetzt = Date.now();
       const eur = x => `${Math.round(x).toLocaleString('de-DE')} €`;
-      const tage = new Map();
-      z.raten.filter(r => r.faellig.getTime() > jetzt).forEach(r => {
-        const k = r.faellig.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
-        const e = tage.get(k) ?? { summe: 0, raten: [], datum: r.faellig };
-        e.summe += r.betrag;
-        e.raten.push(r);
-        tage.set(k, e);
-      });
       const tip = t => t.replace(/"/g, '&quot;');
-      let html = '';
-      [...tage.entries()].forEach(([k, e], i) => {
-        const inTagen = Math.max(0, Math.ceil((e.datum.getTime() - jetzt) / 86400000));
-        if (inTagen > 7) return; // nur 7 Tage vorher anzeigen
-        const zeilen = e.raten.map(r => `Rate #${r.nr} · ${fmtEuro(r.betrag)} (Tilgung ${fmtEuro(r.tilgung)} · Zinsen ${fmtEuro(r.zinsen)}) · ${r.faellig.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`);
-        if (i === 0 && z.restschuld != null) zeilen.push(`Restschuld gesamt: ${fmtEuro(z.restschuld)}`);
-        html += `<a class="fi-dash-pill" href="/game/bank.php" style="text-decoration:none;" data-fi-tip="${tip(zeilen.join('\n'))}">💳 ${k} · ${eur(e.summe)} <span style="color:#9aa5b8; font-weight:600;">in ${inTagen} T</span></a>`;
-      });
-      // Gehälter: monatlich am Tag der letzten Buchung (beobachtet: 28. um 00:01), nächster Termin = Folgemonat
-      let gehaltTermin = null;
+
+      // Gehalt: monatlich am Tag der letzten Buchung (beobachtet: 28. um 00:01), nächster Termin = Folgemonat
+      let gehalt = null;
       if (z.gehalt != null) {
         const basis = z.letztesGehalt?.datum ?? null;
         const tag = basis ? basis.getDate() : 28;
         const std = basis ? [basis.getHours(), basis.getMinutes()] : [0, 1];
         let kand = new Date(new Date().getFullYear(), new Date().getMonth(), tag, std[0], std[1]);
         if (kand.getTime() <= jetzt) kand = new Date(kand.getFullYear(), kand.getMonth() + 1, tag, std[0], std[1]);
-        gehaltTermin = kand;
-        const inTagen = Math.max(0, Math.ceil((kand.getTime() - jetzt) / 86400000));
+        gehalt = { art: 'gehalt', datum: kand, betrag: z.gehalt, tag, std };
+      }
+
+      // Alle anstehenden Zahlungen chronologisch durchrechnen
+      const zahlungen = [
+        ...z.raten.filter(r => r.faellig.getTime() > jetzt).map(r => ({ art: 'rate', datum: r.faellig, betrag: r.betrag, r })),
+        ...(gehalt ? [gehalt] : []),
+      ].sort((x, y) => x.datum - y.datum);
+      let saldo = z.konto;
+      zahlungen.forEach(p => {
+        if (saldo == null) { p.fehlt = false; return; }
+        if (saldo >= p.betrag) { saldo -= p.betrag; p.fehlt = false; } else { p.fehlt = true; p.luecke = p.betrag - saldo; }
+      });
+
+      const inTagen = d => Math.max(0, Math.ceil((d.getTime() - jetzt) / 86400000));
+      const fehltText = p => (p.fehlt ? `\n✗ Geld fehlt: ${fmtEuro(p.luecke)} (verfügbar ${fmtEuro(Math.max(0, z.konto ?? 0))})` : '');
+      let html = '';
+
+      // Kreditraten je Fälligkeitstag
+      const tage = new Map();
+      zahlungen.filter(p => p.art === 'rate' && inTagen(p.datum) <= 7).forEach(p => {
+        const k = p.datum.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+        const e = tage.get(k) ?? { summe: 0, liste: [], datum: p.datum };
+        e.summe += p.betrag;
+        e.liste.push(p);
+        tage.set(k, e);
+      });
+      [...tage.entries()].forEach(([k, e], i) => {
+        const zeilen = e.liste.map(p => `${p.fehlt ? '✗ ' : ''}Rate #${p.r.nr} · ${fmtEuro(p.betrag)} (Tilgung ${fmtEuro(p.r.tilgung)} · Zinsen ${fmtEuro(p.r.zinsen)}) · ${p.datum.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}${p.fehlt ? ` - Geld fehlt: ${fmtEuro(p.luecke)}` : ''}`);
+        if (i === 0 && z.restschuld != null) zeilen.push(`Restschuld gesamt: ${fmtEuro(z.restschuld)}`);
+        const fehlt = e.liste.some(p => p.fehlt);
+        html += `<a class="fi-dash-pill${fehlt ? ' is-negative' : ''}" href="/game/bank.php" style="text-decoration:none;" data-fi-tip="${tip(zeilen.join('\n'))}">💳 ${k} · ${eur(e.summe)} <span style="${fehlt ? '' : 'color:#9aa5b8; '}font-weight:600;">in ${inTagen(e.datum)} T</span></a>`;
+      });
+
+      // Gehalt
+      if (gehalt && inTagen(gehalt.datum) <= 7) {
         const tipText = [
-          `Gehaltsabrechnung monatlich (abgebucht am ${tag}. um ${String(std[0]).padStart(2, '0')}:${String(std[1]).padStart(2, '0')}).`,
+          `Gehaltsabrechnung monatlich (abgebucht am ${gehalt.tag}. um ${String(gehalt.std[0]).padStart(2, '0')}:${String(gehalt.std[1]).padStart(2, '0')}).`,
           z.letztesGehalt ? `Zuletzt ${z.letztesGehalt.datum.toLocaleDateString('de-DE')}: ${fmtEuro(z.letztesGehalt.betrag)}.` : '',
           `Aktuelle Monatsgehälter: ${fmtEuro(z.gehalt)} (die Abrechnung kann anteilig abweichen, z. B. bei Neueinstellungen).`,
-        ].filter(Boolean).join('\n');
-        if (inTagen <= 7) html += `<a class="fi-dash-pill" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tip(tipText)}">👥 ${kand.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })} · ~${eur(z.gehalt)} <span style="color:#9aa5b8; font-weight:600;">in ${inTagen} T</span></a>`;
-      }
-      // Warnung: Kontostand deckt die Zahlungen der nächsten 7 Tage nicht
-      const faellig14 = z.raten.filter(r => r.faellig.getTime() > jetzt && r.faellig.getTime() < jetzt + 7 * 86400000).reduce((a, r) => a + r.betrag, 0)
-        + (gehaltTermin && gehaltTermin.getTime() < jetzt + 7 * 86400000 ? z.gehalt : 0);
-      if (z.konto != null && faellig14 > z.konto) {
-        html += `<span class="fi-dash-pill is-warn">⚠ Kontostand reicht nicht für die Raten (${eur(faellig14)})</span>`;
+        ].filter(Boolean).join('\n') + fehltText(gehalt);
+        html += `<a class="fi-dash-pill${gehalt.fehlt ? ' is-negative' : ''}" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tip(tipText)}">👥 ${gehalt.datum.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })} · ~${eur(z.gehalt)} <span style="${gehalt.fehlt ? '' : 'color:#9aa5b8; '}font-weight:600;">in ${inTagen(gehalt.datum)} T</span></a>`;
       }
       el.innerHTML = html;
     }
