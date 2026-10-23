@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.78
+// @version      0.29.80
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.78';
+  const SCRIPT_VERSION = '0.29.80';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2510,6 +2510,21 @@
       .fi-abrufe-liste { max-height: 260px; overflow: auto; font: 11px ui-monospace, Consolas, monospace; color: #7f8aa0; line-height: 1.5; border-top: 1px solid rgba(255,255,255,.08); padding-top: 4px; }
       .fi-abrufe-url { color: #9aa5b8; word-break: break-all; }
 
+      /* ====== Einnahmen je Tag über der Datumsachse ====== */
+      .fi-ein-seg { position: absolute; top: 0; height: 16px; box-sizing: border-box; padding: 0 2px; text-align: center; white-space: nowrap; overflow: hidden;
+        border-left: 1px solid rgba(142,242,168,.35); font: 700 11px/16px ui-monospace, Consolas, monospace; color: #8ef2a8; container-type: inline-size; }
+      .fi-ein-seg .voll { display: none; }
+      @container (min-width: 84px) { .fi-ein-seg .voll { display: inline; } .fi-ein-seg .kurz { display: none; } }
+
+      /* ====== Handy: Tourenplan seitlich wischbar, Fahrzeugnamen bleiben links stehen ====== */
+      @media (max-width: 700px) {
+        #fi-dash-timeline { overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 4px; }
+        #fi-dash-timeline .fi-dash-timeline-row { min-width: 680px; }
+        #fi-dash-timeline .fi-dash-timeline-label { position: sticky; left: 0; z-index: 4; width: 100px; background: #0f1320; padding-right: 4px; }
+        .fi-dash-controls { gap: 6px; }
+        #fi-dashboard { padding-left: 0; padding-right: 0; }
+      }
+
       /* ====== Timeline (mehrere Fahrzeuge auf einen Blick) ====== */
       .fi-dash-timeline-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; font-size: 11px; color: #cbd5e1; }
       .fi-dash-timeline-legend span { display: inline-flex; align-items: center; gap: 6px; }
@@ -2742,6 +2757,41 @@
           <span><i style="background:#c1554a;"></i>Pause / Schichtpause</span>
           <span><i style="background:#ff5c5c;"></i>Nächster Planungsbedarf</span>
         </div>`;
+  }
+
+  /**
+   * Zeile über der Datumsachse: je Kalendertag die erwarteten Einnahmen (netto) der an diesem Tag endenden,
+   * bereits eingeplanten Touren. Schmale Tage zeigen "52k", breite die volle Zahl (Container-Query).
+   */
+  function baueEinnahmenZeileHtml(tage, fensterStartMs, fensterEndeMs) {
+    if (!tage || !tage.size) return '';
+    const dauer = fensterEndeMs - fensterStartMs;
+    const segmente = [];
+    const tag = new Date(fensterStartMs);
+    tag.setHours(0, 0, 0, 0);
+    for (let guard = 0; tag.getTime() < fensterEndeMs && guard < 14; guard++) {
+      const von = tag.getTime();
+      const bis = new Date(tag.getFullYear(), tag.getMonth(), tag.getDate() + 1).getTime();
+      const l = Math.max(von, fensterStartMs), r = Math.min(bis, fensterEndeMs);
+      const schluessel = tag.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+      const e = tage.get(schluessel);
+      if (r > l && e) {
+        const voll = `+${Math.round(e.netto).toLocaleString('de-DE')} €`;
+        const kurz = `+${Math.round(e.netto / 1000)}k`;
+        const tip = `${tag.toLocaleDateString('de-DE', { weekday: 'short' })} ${schluessel} · +${Math.round(e.netto).toLocaleString('de-DE')} € netto (${Math.round(e.brutto).toLocaleString('de-DE')} € brutto, ${e.touren} Tour${e.touren > 1 ? 'en' : ''})`;
+        segmente.push(`<div class="fi-ein-seg" style="left:${(((l - fensterStartMs) / dauer) * 100).toFixed(2)}%; width:${(((r - l) / dauer) * 100).toFixed(2)}%;" data-fi-tip="${tip}"><span class="voll">${voll}</span><span class="kurz">${kurz}</span></div>`);
+      }
+      tag.setDate(tag.getDate() + 1);
+    }
+    if (!segmente.length) return '';
+    const alle = [...tage.entries()].sort((a, b) => a[1].datum - b[1].datum)
+      .map(([k, e]) => `${e.datum.toLocaleDateString('de-DE', { weekday: 'short' })} ${k} · +${Math.round(e.netto).toLocaleString('de-DE')} € netto`);
+    const summe = [...tage.values()].reduce((a, e) => a + e.netto, 0);
+    alle.push(`Summe: +${Math.round(summe).toLocaleString('de-DE')} € netto (nur eingeplante Touren, geschätzt)`);
+    return `<div class="fi-dash-timeline-row" style="margin-bottom:2px;">
+      <div class="fi-dash-timeline-label" data-fi-tip="${alle.join(String.fromCharCode(10)).replace(/"/g, '&quot;')}"><span class="fi-lbl-name" style="color:#8ef2a8;">💶 netto</span></div>
+      <div class="fi-dash-timeline-track" style="height:16px; background:none; border:none; overflow:visible;">${segmente.join('')}</div>
+    </div>`;
   }
 
   function baueTimelineKopfzeileHtml(fensterStartMs, fensterEndeMs, markerMs = null, markerLabel = '') {
@@ -3125,7 +3175,7 @@
       // Info-Feld: Chips (Warnungen/Urlaubsantrag) füllt aktualisiereFlotte(); hier nur der Sync-Knopf
       const kopfEl = document.getElementById('fi-dash-header');
       if (!kopfEl) return;
-      kopfEl.innerHTML = `<span id="fi-einnahmen" style="display:contents;"></span><span id="fi-info-chips" style="display:contents;"></span><button type="button" id="fi-sync-pill" class="fi-dash-pill is-muted" style="cursor:pointer;" title="Mitschnitt in privates GitHub-Repo hochladen (PC und Handy zusammen auswerten)">${syncPillText()}</button>`;
+      kopfEl.innerHTML = `<span id="fi-info-chips" style="display:contents;"></span><button type="button" id="fi-sync-pill" class="fi-dash-pill is-muted" style="cursor:pointer;" title="Mitschnitt in privates GitHub-Repo hochladen (PC und Handy zusammen auswerten)">${syncPillText()}</button>`;
       kopfEl.querySelector('#fi-sync-pill')?.addEventListener('click', () => { bedienSyncPill().catch(e => window.alert(`Sync: ${e.message}`)); });
     }
     await aktualisiereKopf();
@@ -3258,21 +3308,8 @@
       // Verschleiß-Chip nur wenn ein Bauteil <= 10 Prozentpunkte über dem Mindestwert liegt (<= 0: defekt).
       const [pruef, kmProTag, tourRatenMap] = await Promise.all([fetchPruefstand(), fetchKmProTag(), fetchTourRaten()]);
 
-      // Erwartete Einnahmen (oberste Zeile): netto, bis zum Ende der eingeplanten Touren
-      const einnahmenEl = document.getElementById('fi-einnahmen');
-      if (einnahmenEl) {
-        const ee = berechneErwarteteEinnahmen(fleet, tourRatenMap);
-        if (ee.touren) {
-          const eurK = x => `${Math.round(x).toLocaleString('de-DE')} €`;
-          const sortiert = [...ee.tage.entries()].sort((a, b) => a[1].datum - b[1].datum);
-          const letzter = sortiert[sortiert.length - 1][0];
-          const zeilen = sortiert.map(([k, t]) => `${t.datum.toLocaleDateString('de-DE', { weekday: 'short' })} ${k} · +${eurK(t.netto)} netto (${eurK(t.brutto)} brutto, ${t.touren} Tour${t.touren > 1 ? 'en' : ''})`);
-          zeilen.push('Geschätzt: Strecke × Ø-€/km je Fahrzeug (7 Tage) abzüglich Maut/Diesel.', 'Nur bereits eingeplante Touren (Planungsfenster).');
-          einnahmenEl.innerHTML = `<span class="fi-dash-pill is-positive" data-fi-tip="${tipText(zeilen.join('\n'))}">💶 +${eurK(ee.netto)} bis ${letzter}</span>`;
-        } else {
-          einnahmenEl.innerHTML = '';
-        }
-      }
+      // Erwartete Einnahmen: Tageswerte (netto) werden im Tourenplan über dem Datum angezeigt
+      const einnahmen = berechneErwarteteEinnahmen(fleet, tourRatenMap);
       if (pruef?.length) {
         const jetztMs = Date.now();
         const maxKmTag = kmProTag && kmProTag.size ? Math.max(...kmProTag.values()) : 1200;
@@ -3362,6 +3399,7 @@
           // Ein einzelner Fetch (mit ?date=heute, siehe fetchVehicleStatus)
           // liefert bereits eine ganze Woche an Tagen - kein Mehrfach-Nachladen
           // mehr nötig (das hat vorher nur Duplikate erzeugt, siehe Chat).
+          timelineHtml += baueEinnahmenZeileHtml(einnahmen.tage, fensterStartMs, fensterEndeMs);
           timelineHtml += baueTimelineKopfzeileHtml(fensterStartMs, fensterEndeMs, markerMs, markerLabel);
           fleet.forEach((entry, zeilenIndex) => {
             const vehicleId = entry.status?.vehicleId;
