@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.88
+// @version      0.29.89
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.88';
+  const SCRIPT_VERSION = '0.29.89';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3673,6 +3673,7 @@
           // Fahrzeuge ohne buchbaren Auftrag (nicht einplanbar, Frist nicht zu halten, Urlaub, ...) werden ausgeblendet
           const besteProFahrzeug = loeseFahrzeugKonflikte(besteProFahrzeugRoh).filter(e => e.beste);
           if (!besteProFahrzeug.length) html += '<div class="fi-empty">Kein Fahrzeug einplanbar.</div>';
+          else html = `<div style="grid-column: 1 / -1;"><button type="button" class="fi-dash-btn fi-cat-fill" data-kategorie="${kategorieLabel}">⚡ Alle ${kategorieLabel} befüllen</button></div>` + html;
           besteProFahrzeug.forEach((eintrag, kartenIndex) => {
             const titel = eintrag.vehicleId
               ? `<a href="/game/dispatch.php?vehicle_id=${encodeURIComponent(eintrag.vehicleId)}">🚐 ${eintrag.fahrzeugName}</a>`
@@ -3725,13 +3726,23 @@
     const autofillBtn = document.getElementById('fi-dash-autofill-btn');
     let autofillLaeuft = false;
     let autofillAbbruch = false;
+    let autofillKategorie = null; // gesetzt vom "Alle <Frachtart> befüllen"-Knopf: nur Fahrzeuge dieser Kategorie
+    resultsEl.addEventListener('click', ev => {
+      const b = ev.target.closest('.fi-cat-fill');
+      if (!b) return;
+      autofillKategorie = b.dataset.kategorie;
+      autofillBtn.click();
+    });
 
     autofillBtn.addEventListener('click', async () => {
       if (autofillLaeuft) {
+        autofillKategorie = null;
         autofillAbbruch = true;
         autofillBtn.textContent = 'Stoppe nach aktuellem Schritt …';
         return;
       }
+      const nurKategorie = autofillKategorie;
+      autofillKategorie = null;
       const trocken = document.getElementById('fi-dash-autofill-dry').checked;
       fiGetSpeicherLeeren(); // Befüllen startet immer mit frischen Daten
 
@@ -3743,7 +3754,7 @@
       reloadBtn.disabled = true;
       resultsEl.innerHTML = '<div id="fi-autofill-konsole" style="grid-column: 1 / -1;"></div><div id="fi-autofill-log" style="grid-column: 1 / -1;"></div>';
       const logEl = document.getElementById('fi-autofill-log');
-      const konsole = baueScanKonsole(document.getElementById('fi-autofill-konsole'), 'Alle Fahrzeuge befüllen');
+      const konsole = baueScanKonsole(document.getElementById('fi-autofill-konsole'), `Alle ${nurKategorie ?? 'Fahrzeuge'} befüllen`);
       delete resultsEl.dataset.gesehen;
       startWennSichtbar(resultsEl);
       resultsEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -3758,6 +3769,7 @@
 
       try {
         const ergebnis = await befuelleFlotteAutomatisch({
+          nurKategorie,
           options,
           log,
           abgebrochen: () => autofillAbbruch,
@@ -4204,7 +4216,7 @@
    * den Tourenplaner, dessen Request noch nicht erfasst ist.
    * @param {{options: {value: string, label: string}[], log: Function, abgebrochen: Function, trocken?: boolean}} param
    */
-  async function befuelleFlotteAutomatisch({ options, log, abgebrochen, trocken = false, fortschritt = () => {}, konsole = null }) {
+  async function befuelleFlotteAutomatisch({ options, log, abgebrochen, trocken = false, fortschritt = () => {}, konsole = null, nurKategorie = null }) {
     const MAX_RUNDEN = 15;
     let simulierteFlotte = null;
     let anzahlAngenommen = 0;
@@ -4258,7 +4270,7 @@
       }
 
       fleet = fleet.filter(f => !gesperrteFahrzeuge.has(String(f.status.vehicleId)));
-      const kategorien = [...new Set(fleet.map(f => f.typ))];
+      const kategorien = [...new Set(fleet.map(f => f.typ))].filter(k => !nurKategorie || k === nurKategorie);
       const zuweisungen = [];
       schritteGesamt += kategorien.length + 1;
 
