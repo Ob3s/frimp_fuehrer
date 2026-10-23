@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.87
+// @version      0.29.88
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.87';
+  const SCRIPT_VERSION = '0.29.88';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2498,7 +2498,7 @@
       .fi-skel::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 25%; background: linear-gradient(90deg, transparent, rgba(255,217,138,.28), transparent); transform: translateX(-100%); animation: fi-shimmer 1.2s linear infinite; }
       @keyframes fi-shimmer { to { transform: translateX(400%); } }
       .fi-zeile-neu .fi-dash-phase-block { transform-origin: left center; animation: fi-wachs .5s ease-out backwards; }
-      @media (prefers-reduced-motion: reduce) { .fi-karte, .fi-karte *, .fi-karte::before, .fi-scan *, .fi-skel::after, .fi-zeile-neu *, .fi-einflug, .fi-aufbau *, #fi-info-chips * { animation: none !important; } }
+      @media (prefers-reduced-motion: reduce) { .fi-lade *, .fi-cat-btn, .fi-karte, .fi-karte *, .fi-karte::before, .fi-scan *, .fi-skel::after, .fi-zeile-neu *, .fi-einflug, .fi-aufbau *, #fi-info-chips * { animation: none !important; } }
 
       /* ====== Abruf-Log (ganz unten, zugeklappt) ====== */
       #fi-dash-abrufe { margin-top: 10px; }
@@ -2515,6 +2515,20 @@
         border-left: 1px solid rgba(142,242,168,.35); font: 700 11px/16px ui-monospace, Consolas, monospace; color: #8ef2a8; container-type: inline-size; }
       .fi-ein-seg .voll { display: none; }
       @container (min-width: 84px) { .fi-ein-seg .voll { display: inline; } .fi-ein-seg .kurz { display: none; } }
+
+      /* ====== Frachtart-Buttons + Lade-Animation der Bedienleiste ====== */
+      #fi-dashboard .fi-controls-laden > :not(.fi-lade) { display: none !important; }
+      #fi-dashboard .fi-controls-bereit .fi-lade { display: none !important; }
+      #fi-dashboard #fi-dash-load-btn, #fi-dashboard #fi-dash-bodytype { display: none !important; }
+      .fi-lade { display: flex; align-items: center; gap: 12px; width: 100%; }
+      .fi-lade .fi-road { flex: 1; margin: 0; }
+      .fi-lade .fi-truck { animation: fi-fahrt 2.4s linear infinite; transition: none; left: -8%; }
+      @keyframes fi-fahrt { from { left: -8%; } to { left: 100%; } }
+      .fi-lade-text { font-size: 12px; color: #9aa5b8; white-space: nowrap; }
+      .fi-cat-row { display: flex; flex-wrap: wrap; gap: 6px; }
+      #fi-dashboard .fi-cat-btn { background: rgba(255,255,255,.07) !important; color: #ffd98a !important; border: 1px solid rgba(255,217,138,.5) !important; }
+      #fi-dashboard .fi-cat-btn.is-aktiv { background: linear-gradient(180deg, #ffd98a, #f5b84b) !important; color: #211404 !important; }
+      .fi-controls-bereit .fi-cat-btn { animation: fi-einflug .4s ease-out backwards; animation-delay: calc(var(--i, 0) * 90ms); }
 
       /* ====== Handy: Tourenplan seitlich wischbar, Fahrzeugnamen bleiben links stehen ====== */
       @media (max-width: 700px) {
@@ -3157,12 +3171,11 @@
       <div id="fi-dash-zahlungen" class="fi-dash-pills"></div>
 
       <h3>Frachtbörse</h3>
-      <div class="fi-dash-controls">
-        <div class="fi-dash-field">
-          <label>Fahrzeugkategorie</label>
-          <select id="fi-dash-bodytype" class="fi-dash-select"></select>
-        </div>
-        <button type="button" id="fi-dash-load-btn" class="fi-dash-btn">Routen berechnen</button>
+      <div class="fi-dash-controls fi-controls-laden" id="fi-dash-controls">
+        <div class="fi-lade"><div class="fi-road"><i class="fi-road-dashes"></i><span class="fi-truck"><span>🚚</span></span></div><span class="fi-lade-text">Lade Flotte und Frachtarten …</span></div>
+        <div id="fi-dash-cats" class="fi-cat-row"></div>
+        <select id="fi-dash-bodytype" style="display:none;"></select>
+        <button type="button" id="fi-dash-load-btn" class="fi-dash-btn" style="display:none;">Routen berechnen</button>
         <button type="button" id="fi-dash-reload-btn" class="fi-dash-btn-reload" title="Cache umgehen und frisch laden">🔄</button>
         <div class="fi-dash-field">
           <label><input type="checkbox" id="fi-dash-autofill-dry" checked> Trockenlauf</label>
@@ -3190,12 +3203,13 @@
     // Diesel-Marktpreis ändert sich laut Spiel täglich - einmal pro
     // Dashboard-Aufbau live abrufen und den Fallback in ASSUMPTIONS
     // überschreiben, damit alle Kostenrechnungen den aktuellen Preis nutzen.
-    const dieselPreisLive = await fetchDieselPreis();
+    // Frachtarten (freight-market.php) starten SOFORT, parallel zu allem anderen - früher wurden sie erst
+    // nach dem Laden der kompletten Flotte geholt (Dropdown erschien deshalb Sekunden später).
+    const optionenPromise = getBodyTypeOptionsAnywhere();
+    const [dieselPreisLive, staedteLive] = await Promise.all([fetchDieselPreis(), fetchStaedteDaten()]);
     if (dieselPreisLive != null) ASSUMPTIONS.dieselPreisProLiter = dieselPreisLive;
-
     // Echte Städte-Stammdaten (Koordinaten/Land/Logistikfaktor) über die
     // statische Fallback-Tabelle legen - siehe fetchStaedteDaten.
-    const staedteLive = await fetchStaedteDaten();
     if (staedteLive) CITY_COORDS = { ...CITY_COORDS, ...staedteLive };
 
     // --- Kopfbereich (Kontostand/Statistik) ---
@@ -3282,6 +3296,9 @@
     // dieselben, schon geladenen Fahrzeugdaten nutzen kann (siehe Chat:
     // Fetch-Anzahl niedrig halten).
     let flotteFuerAuswahl = [];
+    let flottenKategorien = null; // Frachtkategorien, die mit den vorhandenen Fahrzeugen bedient werden können
+    let kategorienFertig = null;
+    const kategorienPromise = new Promise(r => { kategorienFertig = r; });
     async function aktualisiereFlotte() {
       const infoEl = document.getElementById('fi-info-chips');
       if (!infoEl) return;
@@ -3308,6 +3325,8 @@
       };
       const [fleet, fuhrparkDetails] = await Promise.all([fetchFleetStatus(onListe, onFahrzeug), fetchFuhrparkDetails()]);
       flotteFuerAuswahl = fleet;
+      flottenKategorien = new Set(baueFleetMitTyp(fleet, fuhrparkDetails, null).map(f => f.typ).filter(Boolean));
+      kategorienFertig?.();
 
       // Diagnose-Log (siehe Chat): zeigt in der Konsole (F12), ob der neue
       // Code wirklich läuft und wie viele Phasen pro Fahrzeug ankommen -
@@ -3472,11 +3491,13 @@
         });
       }
     }
-    await aktualisiereFlotte();
+    // Flotte lädt weiter im Hintergrund; die Bedienleiste wird bereit, sobald Frachtarten UND Flottenkategorien da sind
+    const flotteLaeuft = aktualisiereFlotte().catch(e => console.error('[FI-Helper] Flotte laden fehlgeschlagen', e)).finally(() => kategorienFertig?.());
+    await kategorienPromise;
 
-    // --- Frachtbörsen-Kategorie-Auswahl befüllen ---
-    const bodyTypeSelect = document.getElementById('fi-dash-bodytype');
-    const options = await getBodyTypeOptionsAnywhere();
+    // --- Frachtart-Buttons: nur Kategorien, die die vorhandenen Fahrzeuge bedienen können ---
+    const bodyTypeSelect = document.getElementById('fi-dash-bodytype'); // bleibt als (unsichtbarer) Wertespeicher für die Berechnung
+    const options = await optionenPromise;
     options.forEach(opt => {
       const el = document.createElement('option');
       el.value = opt.value;
@@ -3489,10 +3510,33 @@
     bodyTypeSelect.addEventListener('change', () => {
       try { window.sessionStorage.setItem('fi_last_bodytype', bodyTypeSelect.value); } catch (e) {}
     });
+    {
+      const bedienbar = options.filter(o => flottenKategorien?.has(o.label));
+      const sichtbar = bedienbar.length ? bedienbar : options; // Fallback: alles, falls kein Typ erkannt wurde
+      if (sichtbar.length && !sichtbar.some(o => o.value === bodyTypeSelect.value)) bodyTypeSelect.value = sichtbar[0].value;
+      const catsEl = document.getElementById('fi-dash-cats');
+      catsEl.innerHTML = sichtbar.map((o, i) => `<button type="button" class="fi-dash-btn fi-cat-btn" data-value="${o.value}" style="--i:${i}">${o.label}</button>`).join('');
+      const markiereAktiv = () => catsEl.querySelectorAll('.fi-cat-btn').forEach(b => b.classList.toggle('is-aktiv', b.dataset.value === bodyTypeSelect.value && !!letzteWahl));
+      catsEl.querySelectorAll('.fi-cat-btn').forEach(btn => btn.addEventListener('click', () => {
+        bodyTypeSelect.value = btn.dataset.value;
+        bodyTypeSelect.dispatchEvent(new Event('change'));
+        letzteWahl = btn.dataset.value;
+        markiereAktiv();
+        routenBerechnen(false);
+      }));
+      markiereAktiv();
+      // fertig geladen: Lade-Animation weg, Bedienelemente fliegen ein (erst wenn im Bild)
+      const controls = document.getElementById('fi-dash-controls');
+      startWennSichtbar(controls);
+      controls.classList.remove('fi-controls-laden');
+      controls.classList.add('fi-controls-bereit');
+    }
 
     // --- Routen berechnen (nutzt denselben Cache + dieselbe Bewertungslogik wie die Sidebar) ---
     const loadBtn = document.getElementById('fi-dash-load-btn');
     const reloadBtn = document.getElementById('fi-dash-reload-btn');
+    new MutationObserver(() => document.querySelectorAll('.fi-cat-btn').forEach(b => { b.disabled = loadBtn.disabled; }))
+      .observe(loadBtn, { attributes: true, attributeFilter: ['disabled'] });
     const resultsEl = document.getElementById('fi-dash-results');
     resultsEl.addEventListener('animationstart', ev => {
       const karte = ev.target;
