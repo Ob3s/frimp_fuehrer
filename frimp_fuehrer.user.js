@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.76
+// @version      0.29.77
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.76';
+  const SCRIPT_VERSION = '0.29.77';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -4887,7 +4887,10 @@
     const neuePhasen = phasen.filter(p => p.firstSeen > stand || (p.geschlossenAm ?? 0) > stand);
     const neueTouren = touren.filter(t => t.erfasst > stand);
     const neueSnaps = snapshots.filter(x => x.zeit > stand);
-    if (!neuePhasen.length && !neueTouren.length && !neueSnaps.length) return { hochgeladen: 0 };
+    // Prognose-Messungen (Beladungsstart: Schätzung vs. Spiel) - beim ersten Mal der ganze Bestand, danach nur Neues
+    const prognoseKomplett = !window.localStorage.getItem('fi_prognose_sync_v1');
+    const neuePrognosen = ladePrognoseLog().filter(x => prognoseKomplett || Date.parse(x.zeit) > stand);
+    if (!neuePhasen.length && !neueTouren.length && !neueSnaps.length && !neuePrognosen.length) return { hochgeladen: 0 };
 
     const geraet = holeGeraetId();
     const stuecke = [];
@@ -4896,6 +4899,7 @@
       stuecke.push({
         geraet, von: stand, bis: jetzt, teil: stuecke.length + 1,
         phasen: neuePhasen.slice(i, i + MAX), touren: neueTouren.slice(i, i + MAX), snapshots: neueSnaps.slice(i, i + MAX),
+        prognosen: i === 0 ? neuePrognosen : [],
       });
     }
     for (const stueck of stuecke) {
@@ -4911,7 +4915,8 @@
       }
     }
     window.localStorage.setItem(SYNC_STAND_KEY, String(jetzt));
-    return { hochgeladen: neuePhasen.length + neueTouren.length + neueSnaps.length };
+    window.localStorage.setItem('fi_prognose_sync_v1', '1');
+    return { hochgeladen: neuePhasen.length + neueTouren.length + neueSnaps.length + neuePrognosen.length };
   }
 
   /** Klick auf den "☁ Sync"-Pill im Dashboard: Token eingeben/ändern oder sofort synchronisieren. */
