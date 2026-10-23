@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.64
+// @version      0.29.65
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.64';
+  const SCRIPT_VERSION = '0.29.65';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2999,6 +2999,7 @@
     dashboard.innerHTML = `
       <h2>🚚 Frimp Führer <span style="font-size:12px; font-weight:700; color:#9aa5b8;">v${SCRIPT_VERSION}</span></h2>
       <div id="fi-dash-header" class="fi-dash-pills"><div class="fi-dash-pill">Lade …</div></div>
+      <div id="fi-dash-zahlungen" class="fi-dash-pills"></div>
 
       <h3>Frachtbörse</h3>
       <div class="fi-dash-controls">
@@ -3024,6 +3025,7 @@
 
     // Nach den Statistik-Karten einfügen, vor der (jetzt versteckten) Sperr-Meldung
     const statsSection = wrap.querySelector('.tour-stats');
+    if (statsSection) statsSection.style.display = 'none'; // "Aktive/Angenommene/Erfüllte/Nicht erfüllte Touren" sind auf Wunsch entfallen
     if (statsSection && statsSection.nextSibling) {
       statsSection.parentNode.insertBefore(dashboard, statsSection.nextSibling);
     } else {
@@ -3050,6 +3052,42 @@
       kopfEl.querySelector('#fi-sync-pill')?.addEventListener('click', () => { bedienSyncPill().catch(e => window.alert(`Sync: ${e.message}`)); });
     }
     await aktualisiereKopf();
+
+    // --- Mini-Übersicht: nächste Kreditraten (je Tag gebündelt) + Gehälter ---
+    async function aktualisiereZahlungen() {
+      const el = document.getElementById('fi-dash-zahlungen');
+      if (!el) return;
+      const z = await fetchZahlungsplan();
+      if (!z) return;
+      const jetzt = Date.now();
+      const eur = x => `${Math.round(x).toLocaleString('de-DE')} €`;
+      const tage = new Map();
+      z.raten.filter(r => r.faellig.getTime() > jetzt).forEach(r => {
+        const k = r.faellig.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+        const e = tage.get(k) ?? { summe: 0, raten: [], datum: r.faellig };
+        e.summe += r.betrag;
+        e.raten.push(r);
+        tage.set(k, e);
+      });
+      const tip = t => t.replace(/"/g, '&quot;');
+      let html = '';
+      [...tage.entries()].slice(0, 2).forEach(([k, e], i) => {
+        const inTagen = Math.max(0, Math.ceil((e.datum.getTime() - jetzt) / 86400000));
+        const zeilen = e.raten.map(r => `Rate #${r.nr} · ${fmtEuro(r.betrag)} (Tilgung ${fmtEuro(r.tilgung)} · Zinsen ${fmtEuro(r.zinsen)}) · ${r.faellig.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`);
+        if (i === 0 && z.restschuld != null) zeilen.push(`Restschuld gesamt: ${fmtEuro(z.restschuld)}`);
+        html += `<a class="fi-dash-pill" href="/game/bank.php" style="text-decoration:none;" data-fi-tip="${tip(zeilen.join('\n'))}">💳 ${k} · ${eur(e.summe)} <span style="color:#9aa5b8; font-weight:600;">in ${inTagen} T</span></a>`;
+      });
+      if (z.gehalt != null) {
+        html += `<a class="fi-dash-pill" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tip(`Gehälter ${fmtEuro(z.gehalt)} pro Monat (automatische Fixkosten).\nEinen Zahltermin nennt das Spiel nicht; seit 01.10. gab es noch keine Gehaltsbuchung.\nKündigungen rechnen anteilig (z. B. 23/31 Tage), also wird rückwirkend pro Monat gezahlt - vermutlich zum Monatswechsel.`)}">👥 ${eur(z.gehalt)}/Monat <span style="color:#9aa5b8; font-weight:600;">Termin offen</span></a>`;
+      }
+      // Warnung: Kontostand deckt die Raten der nächsten 14 Tage nicht
+      const faellig14 = z.raten.filter(r => r.faellig.getTime() > jetzt && r.faellig.getTime() < jetzt + 14 * 86400000).reduce((a, r) => a + r.betrag, 0);
+      if (z.konto != null && faellig14 > z.konto) {
+        html += `<span class="fi-dash-pill is-warn">⚠ Kontostand reicht nicht für die Raten (${eur(faellig14)})</span>`;
+      }
+      el.innerHTML = html;
+    }
+    aktualisiereZahlungen();
 
     // --- Flotte (große Karten statt schmaler Sidebar-Zeilen) ---
     // flotteFuerAuswahl: von aktualisiereFlotte() befüllt, damit die
@@ -3562,6 +3600,39 @@
       fetchFuhrparkDetails(erzwingeNeuladen),
     ]);
     return { fleetMitLive, detailsMap };
+  }
+
+  /**
+   * Zahlungsplan aus bank.php: geplante Kreditraten (Fälligkeit, Betrag, Tilgung/Zinsen),
+   * Monatsgehälter, Restschuld, Kontostand. Der Zahltermin der Gehälter steht NICHT im Spiel
+   * (weder Bank noch Personal noch Hilfe-Wiki); in der Buchungshistorie gibt es bisher keine
+   * Gehaltsbuchung - Kündigungen rechnen anteilig ("23/31 Tage"), also wird rückwirkend pro
+   * Monat gezahlt, vermutlich zum Monatswechsel.
+   */
+  async function fetchZahlungsplan() {
+    try {
+      const res = await fetch('/game/bank.php', { credentials: 'same-origin', cache: 'no-store' });
+      if (!res.ok) return null;
+      const doc = safeParseHtml(await res.text());
+      const zahl = t => parseFloat(t.replace(/\./g, '').replace(',', '.'));
+      const raten = [];
+      doc.querySelectorAll('tr').forEach(tr => {
+        const t = tr.textContent.replace(/\s+/g, ' ').trim();
+        const m = /Kreditrate #(\d+)\s*Tilgung ([\d.,]+) € · Zinsen ([\d.,]+) €\s*(\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2})\s*scheduled\s*([\d.,]+) €/.exec(t);
+        if (m) raten.push({ nr: +m[1], tilgung: zahl(m[2]), zinsen: zahl(m[3]), faellig: new Date(+m[6], +m[5] - 1, +m[4], +m[7], +m[8]), betrag: zahl(m[9]) });
+      });
+      const text = (doc.body.textContent || '').replace(/\s+/g, ' ');
+      const nimm = re => { const m = re.exec(text); return m ? zahl(m[1]) : null; };
+      return {
+        raten: raten.sort((a, b) => a.faellig - b.faellig),
+        gehalt: nimm(/Monatliche Gehälter\s*([\d.,]+) €/),
+        restschuld: nimm(/Aktuelle Restschuld\s*([\d.,]+) €/),
+        konto: nimm(/Kontostand\s*(-?[\d.,]+) €/),
+      };
+    } catch (e) {
+      console.warn('[FI-Helper] Zahlungsplan konnte nicht geladen werden', e);
+      return null;
+    }
   }
 
   /**
