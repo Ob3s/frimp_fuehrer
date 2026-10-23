@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.74
+// @version      0.29.76
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.74';
+  const SCRIPT_VERSION = '0.29.76';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -4971,6 +4971,144 @@
   }
 
   // ============================================================
+  // FUHRPARK-LISTE (fuhrpark.php): Karten -> kompakte Liste, Handlungsbedarf oben
+  // ============================================================
+  /**
+   * Ersetzt das Kartenraster durch zwei Listen (Fahrzeuge, Auflieger). Oben stehen Fahrzeuge mit
+   * Handlungsbedarf (Sattelzugmaschine ohne Auflieger, Fahrer 1/2 nicht zugewiesen, beide fehlen =
+   * ganz oben) bzw. nicht gekoppelte Auflieger. Ein Klick auf eine Zeile klappt die ORIGINAL-Karte
+   * darunter auf (Fahrer zuweisen, Auflieger koppeln, Werkstatt … bleiben unverändert nutzbar).
+   * Schlägt der Aufbau fehl, bleibt das Kartenraster unangetastet.
+   */
+  function baueFuhrparkListe() {
+    const karten = [...document.querySelectorAll('.fleet-card')];
+    if (!karten.length || document.getElementById('fi-fuhrpark-liste')) return;
+
+    const text = c => c.textContent.replace(/\s+/g, ' ').trim();
+    const nat = (a, b) => a.localeCompare(b, 'de', { numeric: true });
+    const esc = t => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+    const daten = karten.map(card => {
+      const t = text(card);
+      const istFahrzeug = !!card.querySelector('form[action*="fleet_assign_driver"]');
+      const name = card.querySelector('.fleet-name')?.textContent.trim() ?? '?';
+      const typ = card.querySelector('img')?.getAttribute('alt') ?? '';
+      const heading = card.querySelector('.fleet-heading-line')?.textContent.replace(/\s+/g, ' ').trim() ?? '';
+      const gekoppeltPlate = /Gekoppelt:\s*(.+)$/.exec(heading)?.[1]?.trim() ?? null;
+      const fahrer = [1, 2].map(slot => {
+        const form = [...card.querySelectorAll('form[action*="fleet_assign_driver"]')].find(f => String(f.querySelector('[name=driver_slot]')?.value) === String(slot));
+        const sel = form?.querySelector('select[name=employee_id]');
+        if (!sel || !sel.value) return null;
+        return sel.selectedOptions[0]?.textContent.split('·')[0].trim() || null;
+      });
+      const kennzeichen = istFahrzeug ? null : (/Kennzeichen\s*(.+?)\s+Status/.exec(t)?.[1]?.trim() ?? null);
+      const status = card.querySelector('.fleet-status')?.textContent.replace(/\s+/g, ' ').trim() ?? '';
+      return {
+        card, raster: card.closest('.fleet-grid') ?? card.parentElement, istFahrzeug, name, typ, gekoppeltPlate, fahrer, kennzeichen, status,
+        braucheAuflieger: istFahrzeug && /über Auflieger/i.test(t) && !gekoppeltPlate,
+        standort: /Standort\s*(.+?)\s*Hauptuntersuchung/.exec(t)?.[1]?.trim() ?? '',
+        km: /Kilometer\s*([\d.]+)\s*km/.exec(t)?.[1] ?? '',
+        zustand: /Zustand\s*([\d,]+)\s*%/.exec(t)?.[1] ?? '',
+        hu: /Nächste HU\s*(\d{2}\.\d{2}\.\d{4})/.exec(t)?.[1] ?? '',
+        huStufe: card.querySelector('[class*="fi-inspection-due-badge--"]')?.className.match(/badge--(\w+)/)?.[1] ?? '',
+        verplant: /verplant/i.test(status),
+        gekoppeltTrailer: !istFahrzeug && /gekoppelt/i.test(status),
+      };
+    });
+
+    const fahrzeuge = daten.filter(d => d.istFahrzeug);
+    const auflieger = daten.filter(d => !d.istFahrzeug);
+    if (!fahrzeuge.length) return; // unbekanntes Layout -> Karten behalten
+
+    // welcher Auflieger hängt an welchem Fahrzeug (über das Kennzeichen)
+    const zugVonPlate = new Map(fahrzeuge.filter(f => f.gekoppeltPlate).map(f => [f.gekoppeltPlate, f.name]));
+    fahrzeuge.forEach(f => {
+      f.probleme = [];
+      if (f.braucheAuflieger) f.probleme.push('Auflieger fehlt');
+      if (!f.fahrer[0] && !f.fahrer[1]) f.probleme.push('beide Fahrer fehlen');
+      else if (!f.fahrer[0]) f.probleme.push('Fahrer 1 fehlt');
+      else if (!f.fahrer[1]) f.probleme.push('Fahrer 2 fehlt');
+      f.score = (f.braucheAuflieger ? 4 : 0) + (!f.fahrer[0] && !f.fahrer[1] ? 4 : (!f.fahrer[0] || !f.fahrer[1] ? 2 : 0));
+    });
+    fahrzeuge.sort((a, b) => b.score - a.score || nat(a.name, b.name));
+    auflieger.forEach(a => { a.zug = zugVonPlate.get(a.kennzeichen) ?? null; a.score = a.zug ? 0 : 1; });
+    auflieger.sort((a, b) => b.score - a.score || nat(a.typ, b.typ) || nat(a.kennzeichen ?? '', b.kennzeichen ?? ''));
+
+    const huZelle = d => d.hu ? `<span class="fi-fp-hu fi-fp-hu--${esc(d.huStufe)}">${esc(d.hu.slice(0, 6) + d.hu.slice(8))}</span>` : '–';
+    const zustandZelle = d => d.zustand ? `${esc(d.zustand)} %` : '–';
+    const fz = n => n ? esc(n) : '<span class="fi-fp-fehlt">fehlt</span>';
+
+    const zeileFahrzeug = f => `<tr class="fi-fp-zeile${f.score ? ' fi-fp-achtung' : ''}" data-i="${daten.indexOf(f)}">
+      <td><b>${esc(f.name)}</b>${f.probleme.length ? `<div class="fi-fp-probleme">⚠ ${esc(f.probleme.join(' · '))}</div>` : ''}</td>
+      <td>${esc(f.typ)}</td><td>${fz(f.fahrer[0])}</td><td>${fz(f.fahrer[1])}</td>
+      <td>${f.gekoppeltPlate ? esc(f.gekoppeltPlate) : (/über Auflieger/i.test(text(f.card)) ? '<span class="fi-fp-fehlt">fehlt</span>' : '–')}</td>
+      <td>${esc(f.standort)}</td><td class="fi-fp-zahl">${esc(f.km)}</td><td class="fi-fp-zahl">${zustandZelle(f)}</td><td>${huZelle(f)}</td><td>${f.verplant ? 'verplant' : 'frei'}</td><td class="fi-fp-pfeil">▾</td></tr>`;
+    const zeileAuflieger = a => `<tr class="fi-fp-zeile${a.score ? ' fi-fp-achtung' : ''}" data-i="${daten.indexOf(a)}">
+      <td><b>${esc(a.typ || a.name)}</b>${a.score ? '<div class="fi-fp-probleme">⚠ an kein Fahrzeug gekoppelt</div>' : ''}</td>
+      <td>${esc(a.kennzeichen ?? '–')}</td><td>${a.zug ? esc(a.zug) : '<span class="fi-fp-fehlt">frei</span>'}</td>
+      <td>${esc(a.standort)}</td><td class="fi-fp-zahl">${zustandZelle(a)}</td><td>${huZelle(a)}</td><td>${a.verplant ? 'verplant' : 'frei'}</td><td class="fi-fp-pfeil">▾</td></tr>`;
+
+    const kopfFahrzeug = '<thead><tr><th>Fahrzeug</th><th>Typ</th><th>Fahrer 1</th><th>Fahrer 2</th><th>Auflieger</th><th>Standort</th><th>km</th><th>Zustand</th><th>HU</th><th>Status</th><th></th></tr></thead>';
+    const kopfAuflieger = '<thead><tr><th>Auflieger</th><th>Kennzeichen</th><th>An Fahrzeug</th><th>Standort</th><th>Zustand</th><th>HU</th><th>Status</th><th></th></tr></thead>';
+    const wrapFz = document.createElement('div');
+    wrapFz.id = 'fi-fuhrpark-liste';
+    wrapFz.innerHTML = `<table class="fi-fp-tabelle">${kopfFahrzeug}<tbody>${fahrzeuge.map(zeileFahrzeug).join('')}</tbody></table>`;
+    const wrapAufl = auflieger.length ? document.createElement('div') : null;
+    if (wrapAufl) wrapAufl.innerHTML = `<table class="fi-fp-tabelle fi-fp-auflieger">${kopfAuflieger}<tbody>${auflieger.map(zeileAuflieger).join('')}</tbody></table>`;
+
+    // Original-Karten bleiben im Dokument (versteckt) und werden beim Aufklappen unter die Zeile verschoben
+    const style = document.createElement('style');
+    style.textContent = `
+      #fi-fuhrpark-liste { margin: 8px 0 24px; }
+      .fi-fp-tabelle { width: 100%; border-collapse: collapse; margin-bottom: 18px; font-size: 12.5px; color: #dbe2f0; }
+      .fi-fp-tabelle th { text-align: left; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #ffd98a; padding: 4px 8px; border-bottom: 1px solid rgba(255,217,138,.3); }
+      .fi-fp-tabelle td { padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,.06); vertical-align: top; }
+      .fi-fp-zeile { cursor: pointer; }
+      .fi-fp-zeile:hover td { background: rgba(255,255,255,.05); }
+      .fi-fp-achtung td { background: rgba(245,184,75,.10); }
+      .fi-fp-achtung td:first-child { box-shadow: inset 3px 0 0 #f5b84b; }
+      .fi-fp-probleme { color: #ffb48a; font-size: 11px; margin-top: 1px; }
+      .fi-fp-fehlt { color: #ff8a8a; font-weight: 700; }
+      .fi-fp-zahl { text-align: right; font-variant-numeric: tabular-nums; }
+      .fi-fp-pfeil { color: #6f7b90; text-align: right; width: 18px; }
+      .fi-fp-hu--warning { color: #ffb48a; } .fi-fp-hu--critical, .fi-fp-hu--expired, .fi-fp-hu--missing { color: #ff8a8a; font-weight: 700; }
+      .fi-fp-detail > td { padding: 8px 0; background: rgba(0,0,0,.15); }
+    `;
+    document.head.appendChild(style);
+    const verdrahte = (wrap, rasterVon) => {
+      rasterVon.raster.style.setProperty('display', 'none', 'important'); // Spiel-CSS setzt display mit !important
+      rasterVon.raster.insertAdjacentElement('beforebegin', wrap);
+      wrap.addEventListener('click', klick);
+    };
+    const klick = ev => {
+      const zeile = ev.target.closest('.fi-fp-zeile');
+      if (!zeile || ev.target.closest('.fi-fp-detail')) return;
+      const naechste = zeile.nextElementSibling;
+      if (naechste?.classList.contains('fi-fp-detail')) { // zuklappen: Karte zurück ins (versteckte) Raster
+        daten[+zeile.dataset.i].raster.appendChild(naechste.querySelector('.fleet-card'));
+        naechste.remove();
+        zeile.querySelector('.fi-fp-pfeil').textContent = '▾';
+        return;
+      }
+      const d = daten[+zeile.dataset.i];
+      const detail = document.createElement('tr');
+      detail.className = 'fi-fp-detail';
+      const td = document.createElement('td');
+      td.colSpan = zeile.children.length;
+      const container = document.createElement('div');
+      container.className = 'fleet-grid';
+      container.style.display = 'block';
+      container.appendChild(d.card);
+      td.appendChild(container);
+      detail.appendChild(td);
+      zeile.insertAdjacentElement('afterend', detail);
+      zeile.querySelector('.fi-fp-pfeil').textContent = '▴';
+    };
+    verdrahte(wrapFz, fahrzeuge[0]);
+    if (wrapAufl) verdrahte(wrapAufl, auflieger[0]);
+  }
+
+  // ============================================================
   // 7. INIT
   // ============================================================
   // Der Helper läuft AUSSCHLIESSLICH als Cockpit auf active_tours.php -
@@ -4986,6 +5124,8 @@
     initPersonalboerseWertung();
   } else if (/\/game\/truck-catalog\.php/.test(location.pathname)) {
     ergaenzeFehlendeFahrzeuge();
+  } else if (/\/game\/fuhrpark\.php/.test(location.pathname)) {
+    try { baueFuhrparkListe(); } catch (e) { console.error('[FI-Helper] Fuhrpark-Liste fehlgeschlagen', e); }
   }
 
   // Datensammler auf jeder eingeloggten Spielseite (verzögert, damit die Seite
