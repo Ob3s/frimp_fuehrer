@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.90
+// @version      0.29.91
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.90';
+  const SCRIPT_VERSION = '0.29.91';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -136,7 +136,8 @@
   // (-> POST leert den Speicher) bzw. selten - deshalb 10 Minuten geteilt, damit Seitenaufruf, "Routen berechnen"
   // und Datensammler denselben Abruf nutzen.
   const FI_GET_TTL_PLAENE_MS = 10 * 60 * 1000;
-  const fiTtlFuer = adresse => (/\/game\/(dispatch|staff)\.php(\?|$)/.test(adresse) ? FI_GET_TTL_PLAENE_MS : FI_GET_TTL_MS);
+  const fiTtlFuer = adresse => (/\/game\/(dispatch|staff)\.php(\?|$)/.test(adresse) ? FI_GET_TTL_PLAENE_MS
+    : (/\/game\/driver_time_status\.php/.test(adresse) ? 5 * 60 * 1000 : FI_GET_TTL_MS)); // Live-Fahrerzeiten: 5 Min. (Planung rechnet ohnehin mit Puffer)
   const fiGetSpeicher = new Map(); // url -> {zeit, promise}
   let fiAbrufGespart = 0;
   function fiGetSpeicherLeeren() { fiGetSpeicher.clear(); }
@@ -1434,7 +1435,8 @@
       ? filtereNachZielstadt(angebote, zielReferenzStadt, zielRadiusKm)
       : angebote;
 
-    return fleet.map(fahrzeug => {
+    return fleet.map(fahrzeugRoh => {
+      const fahrzeug = mitUrlaubsRueckkehr(fahrzeugRoh);
       const direktKm = (zielReferenzStadt && fahrzeug.status?.freiAbOrt)
         ? geschaetzteStrassenKm(fahrzeug.status.freiAbOrt, zielReferenzStadt)
         : null;
@@ -1584,7 +1586,7 @@
         folgeKandidaten.slice(0, FOLGE_PRUEFEN).forEach(({ f }) => {
           const bF = bewerteFrachtFuerFahrzeug(f, folgeStatus, frischeLive, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (!bF || bF.schaffbar === false || bF.deckungsbeitragEuro == null) return;
-          if (urlaubskonflikt(fahrzeug, f.zielOrt, bF.ankunftZeit)) return;
+          if (urlaubskonflikt(fahrzeug, f.zielOrt, bF.ankunftZeit, basis.ankunftZeit)) return;
           const paarKm = gesamtKmErster + bF.anfahrtKm + (f.entfernungKm ?? 0);
           if (paarKm <= 0) return;
           const paarEff = (basis.deckungsbeitragEuro + bF.deckungsbeitragEuro) / paarKm; // €/km über beide Aufträge
@@ -2072,9 +2074,15 @@
    * Routen bewertet werden (siehe routenBerechnen).
    * @param {boolean} erzwingeNeuladen Cache umgehen (🔄-Knopf)
    */
+  let planungsfensterProbe = null; // {stunden, zeit, anzahl}: zuletzt vom Spiel gelesenes Fenster (rollend: Länge bleibt, Ende wandert mit der Uhr)
   async function aktualisierePlanungsfenster(erzwingeNeuladen = false) {
     const anzahlDisponenten = await fetchDisponentenAnzahl(erzwingeNeuladen);
     PLANUNGSFENSTER_STUNDEN = 24 * (1 + anzahlDisponenten);
+    // Probe nur alle 30 Min. (oder bei geänderter Disponentenzahl / 🔄) - sonst die zuletzt gelesene Fensterlänge verwenden
+    if (!erzwingeNeuladen && planungsfensterProbe && planungsfensterProbe.anzahl === anzahlDisponenten && Date.now() - planungsfensterProbe.zeit < 30 * 60 * 1000) {
+      PLANUNGSFENSTER_STUNDEN = planungsfensterProbe.stunden;
+      return;
+    }
 
     // Exaktes Fensterende direkt vom Spiel: ein absichtlich unmöglicher
     // Planungsversuch (nicht existierende Auftrags-/Fahrzeug-ID, Start weit in
@@ -2098,7 +2106,10 @@
       if (m) {
         const ende = new Date(+m[3], +m[2] - 1, +m[1], +m[4], +m[5]);
         const stunden = (ende.getTime() - Date.now()) / 3600000;
-        if (stunden > 1 && stunden < 24 * 30) PLANUNGSFENSTER_STUNDEN = stunden;
+        if (stunden > 1 && stunden < 24 * 30) {
+          PLANUNGSFENSTER_STUNDEN = stunden;
+          planungsfensterProbe = { stunden, zeit: Date.now(), anzahl: anzahlDisponenten };
+        }
       }
     } catch (e) {
       console.warn('[FI-Helper] Exaktes Planungsfenster nicht lesbar - Berechnung aus Disponenten-Anzahl bleibt', e);
@@ -2965,13 +2976,15 @@
   }
 
   /**
-   * Prüft, ob eine Tour mit einem bevorstehenden Urlaub kollidiert: Sie muss
-   * samt Heimfahrt zum Firmensitz VOR Urlaubsbeginn beendet sein (Urlaub
-   * beginnt um 00:00 des Starttags; Heimfahrt-Schätzung mit 20 % Zuschlag für
-   * Pausen). Bereits laufende/vergangene Urlaube zählen nicht.
+   * Prüft, ob eine Tour mit einem bevorstehenden Urlaub kollidiert: Die Tour (Start bis Rückkehr samt
+   * Heimfahrt, Schätzung mit 20 % Zuschlag für Pausen) darf den Urlaubszeitraum [Beginn 00:00 des
+   * ersten Tages, Ende 23:59 des letzten Tages] nicht überschneiden - sie muss VOR Urlaubsbeginn am
+   * Firmensitz zurück sein ODER erst NACH der Rückkehr des Fahrers starten. Bereits beendete Urlaube
+   * zählen nicht.
+   * @param {Date} [startZeit] Beginn der Tour (Standard: "frei ab" des Fahrzeugs)
    * @returns {string|null} Begründung, falls unzulässig
    */
-  function urlaubskonflikt(fahrzeug, zielOrt, endeZeit) {
+  function urlaubskonflikt(fahrzeug, zielOrt, endeZeit, startZeit = fahrzeug.status?.freiAbZeit ?? new Date()) {
     const urlaube = (fahrzeug.urlaub ?? []).filter(u => u.bis > new Date());
     if (!urlaube.length || !endeZeit) return null;
     const heimat = parseFirmenstandort() || 'Berlin';
@@ -2980,8 +2993,29 @@
     const heimKm = zielOrt && zielOrt !== heimat ? geschaetzteStrassenKm(zielOrt, heimat) : 0;
     const heimStunden = heimKm == null ? 0 : (heimKm / kmh) * 1.2;
     const daheim = new Date(endeZeit.getTime() + heimStunden * 3600 * 1000);
-    const u = urlaube.find(x => daheim > x.von);
-    return u ? `Urlaub ${u.fahrer} ab ${u.von.toLocaleDateString('de-DE')} (${u.status}) - Tour samt Heimfahrt wäre erst ${daheim.toLocaleString('de-DE')} zu Ende` : null;
+    const u = urlaube.find(x => startZeit < x.bis && daheim > x.von);
+    return u ? `Urlaub ${u.fahrer} ${u.von.toLocaleDateString('de-DE')}-${u.bis.toLocaleDateString('de-DE')} (${u.status}) - Tour samt Heimfahrt wäre erst ${daheim.toLocaleString('de-DE')} zu Ende` : null;
+  }
+
+  /**
+   * Liegt das "frei ab" eines Fahrzeugs MITTEN in einem Urlaub seines Fahrers (Fahrzeug steht, Fahrer fehlt),
+   * steht es erst am Tag nach der Rückkehr wieder zur Verfügung (00:00): dann beginnt die nächste Tour dort,
+   * mit ausgeruhten Fahrern.
+   */
+  function mitUrlaubsRueckkehr(fahrzeug) {
+    const frei = fahrzeug.status?.freiAbZeit;
+    if (!frei) return fahrzeug;
+    const u = (fahrzeug.urlaub ?? []).filter(x => x.bis > new Date()).find(x => frei >= x.von && frei <= x.bis);
+    if (!u) return fahrzeug;
+    const regeln = LENKZEIT_REGELN[fahrzeug.live?.drivers?.length ?? 1] || LENKZEIT_REGELN[1];
+    return {
+      ...fahrzeug,
+      status: {
+        ...fahrzeug.status,
+        freiAbZeit: new Date(u.bis.getTime() + 1000),
+        fahrerRestOverride: { restLenkzeitStunden: regeln.fahrzeitAmStueck, restSchichtzeitStunden: regeln.spaetestesSchichtendeStunden },
+      },
+    };
   }
 
   /**
@@ -3791,7 +3825,6 @@
       autofillKategorie = null;
       const trocken = true; // "Alle befüllen" berechnet nur - gebucht wird erst nach "Touren bestätigen"
       befuellPlan = null;
-      fiGetSpeicherLeeren(); // Befüllen startet immer mit frischen Daten
 
       autofillLaeuft = true;
       autofillAbbruch = false;
@@ -4302,7 +4335,7 @@
       if (trocken && simulierteFlotte) {
         fleet = simulierteFlotte;
       } else {
-        const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, true);
+        const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, false); // Speicher nutzen: gleiche Daten wie die Frachtart-Berechnung
         fleet = baueFleetMitTyp(fleetMitLive, detailsMap, null, await fetchUrlaubsSperren())
           .filter(f => f.typ && f.status?.vehicleId && f.status?.freiAbOrt && f.status?.freiAbZeit);
         if (trocken) simulierteFlotte = fleet;
