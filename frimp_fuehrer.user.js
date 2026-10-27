@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.91
+// @version      0.29.92
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.91';
+  const SCRIPT_VERSION = '0.29.92';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2987,32 +2987,41 @@
   function urlaubskonflikt(fahrzeug, zielOrt, endeZeit, startZeit = fahrzeug.status?.freiAbZeit ?? new Date()) {
     const urlaube = (fahrzeug.urlaub ?? []).filter(u => u.bis > new Date());
     if (!urlaube.length || !endeZeit) return null;
-    const heimat = parseFirmenstandort() || 'Berlin';
-    const spez = holeFahrzeugSpezifikation(fahrzeug.verbrauchsTyp ?? fahrzeug.typ);
-    const kmh = spez.geschwindigkeitKmh ?? ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
-    const heimKm = zielOrt && zielOrt !== heimat ? geschaetzteStrassenKm(zielOrt, heimat) : 0;
-    const heimStunden = heimKm == null ? 0 : (heimKm / kmh) * 1.2;
-    const daheim = new Date(endeZeit.getTime() + heimStunden * 3600 * 1000);
+    const daheim = new Date(endeZeit.getTime() + heimfahrtStunden(fahrzeug, zielOrt) * 3600 * 1000);
     const u = urlaube.find(x => startZeit < x.bis && daheim > x.von);
     return u ? `Urlaub ${u.fahrer} ${u.von.toLocaleDateString('de-DE')}-${u.bis.toLocaleDateString('de-DE')} (${u.status}) - Tour samt Heimfahrt wäre erst ${daheim.toLocaleString('de-DE')} zu Ende` : null;
   }
 
+  /** Dauer einer Leerfahrt von `ort` zum Firmensitz (Strecken-Schätzung, 20 % Zuschlag für Pausen). */
+  function heimfahrtStunden(fahrzeug, ort) {
+    const heimat = parseFirmenstandort() || 'Berlin';
+    const spez = holeFahrzeugSpezifikation(fahrzeug.verbrauchsTyp ?? fahrzeug.typ);
+    const kmh = spez.geschwindigkeitKmh ?? ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
+    const heimKm = ort && ort !== heimat ? geschaetzteStrassenKm(ort, heimat) : 0;
+    return heimKm == null ? 0 : (heimKm / kmh) * 1.2;
+  }
+
   /**
    * Liegt das "frei ab" eines Fahrzeugs MITTEN in einem Urlaub seines Fahrers (Fahrzeug steht, Fahrer fehlt),
-   * steht es erst am Tag nach der Rückkehr wieder zur Verfügung (00:00): dann beginnt die nächste Tour dort,
-   * mit ausgeruhten Fahrern.
+   * muss das Fahrzeug erst zur Firma, um den Fahrer nach seiner Rückkehr abzuholen: die nächste Tour startet
+   * dann AM FIRMENSITZ, frühestens am Tag der Rückkehr 00:00 bzw. wenn das Fahrzeug dort eintrifft (spätere
+   * Zeit zählt), mit ausgeruhten Fahrern.
    */
   function mitUrlaubsRueckkehr(fahrzeug) {
     const frei = fahrzeug.status?.freiAbZeit;
     if (!frei) return fahrzeug;
     const u = (fahrzeug.urlaub ?? []).filter(x => x.bis > new Date()).find(x => frei >= x.von && frei <= x.bis);
     if (!u) return fahrzeug;
+    const rueckkehr = u.bis.getTime() + 1000;
+    const inFirma = frei.getTime() + heimfahrtStunden(fahrzeug, fahrzeug.status?.freiAbOrt) * 3600 * 1000;
     const regeln = LENKZEIT_REGELN[fahrzeug.live?.drivers?.length ?? 1] || LENKZEIT_REGELN[1];
     return {
       ...fahrzeug,
+      heimkehr: false, // wird ohnehin zur Firma geholt, die Heimfahrt steckt schon im Startzeitpunkt
       status: {
         ...fahrzeug.status,
-        freiAbZeit: new Date(u.bis.getTime() + 1000),
+        freiAbOrt: parseFirmenstandort() || 'Berlin',
+        freiAbZeit: new Date(Math.max(rueckkehr, inFirma)),
         fahrerRestOverride: { restLenkzeitStunden: regeln.fahrzeitAmStueck, restSchichtzeitStunden: regeln.spaetestesSchichtendeStunden },
       },
     };
