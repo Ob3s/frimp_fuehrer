@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.94
+// @version      0.29.95
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.94';
+  const SCRIPT_VERSION = '0.29.95';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3028,6 +3028,17 @@
   }
 
   /**
+   * Urlaub macht jede Planung dieses Fahrzeugs im Planungsfenster unmöglich: Der Fahrer ist noch nicht zurück
+   * und die Abholung in der Firma samt Rückkehr liegt hinter dem Fenster. Steht schon nach dem Lesen von
+   * staff.php + Fahrzeugstand fest - dafür muss die Frachtbörse nicht gescannt werden.
+   */
+  function urlaubBlockiert(fahrzeug) {
+    const angepasst = mitUrlaubsRueckkehr(fahrzeug);
+    if (angepasst === fahrzeug) return false;
+    return angepasst.status.freiAbZeit.getTime() + aktuellerPlanungspuffer() * 3600 * 1000 > Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000;
+  }
+
+  /**
    * "Muss zurück in die Firma"-Anzeige (🏠), automatisch: Urlaub beginnt in <= 5
    * Tagen (Fahrer + Fahrzeug müssen dann am Firmensitz sein) bzw. HU kritisch/
    * Zustand schlecht (Werkstatt). Erlischt, sobald das Fahrzeug am Firmensitz
@@ -3639,13 +3650,24 @@
         // brauchen für Ketten-Touren ohnehin einen breiten, ungefilterten
         // Datensatz) - Ziel-Filterung und Ketten-Bildung passieren komplett
         // clientseitig in findeBesteRoutenProFahrzeug aus EINEM Scan.
+        // Flotte + Urlaube VOR der Frachtbörse: Fahrzeuge, die wegen Urlaub gar nicht planbar sind, stehen
+        // damit schon fest. Bleibt kein planbares Fahrzeug übrig, wird die Frachtbörse nicht gescannt.
+        const kategorieLabel = options.find(o => o.value === bodyType)?.label ?? bodyType;
+        const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, erzwingeNeuladen);
+        const fleet = baueFleetMitTyp(fleetMitLive, detailsMap, kategorieLabel, await fetchUrlaubsSperren());
+        const urlaubsFahrzeuge = fleet.filter(f => f.typ === kategorieLabel && urlaubBlockiert(f));
+        const kompatibleFleetVollstaendig = fleet.filter(f => f.typ === kategorieLabel && !urlaubsFahrzeuge.includes(f));
+        const marktUebersprungen = !kompatibleFleetVollstaendig.length;
+
         const cacheKey = marktCacheSchluessel(bodyType);
         const cacheEintrag = holeMarktCache(cacheKey);
         const cacheIstFrisch = cacheEintrag && (Date.now() - cacheEintrag.zeitstempel) < MARKT_CACHE_TTL_MS;
 
         let marktErgebnis;
         let ausCache = false;
-        if (cacheIstFrisch && !erzwingeNeuladen) {
+        if (marktUebersprungen) {
+          marktErgebnis = { angebote: [], gescannteSeiten: 0, gesamtSeiten: 0 };
+        } else if (cacheIstFrisch && !erzwingeNeuladen) {
           marktErgebnis = cacheEintrag;
           ausCache = true;
           konsole.stufe('Markt aus Zwischenspeicher');
@@ -3661,17 +3683,12 @@
 
         konsole.fortschritt(0.62);
         const { angebote, gescannteSeiten, gesamtSeiten } = marktErgebnis;
-        const kategorieLabel = options.find(o => o.value === bodyType)?.label ?? bodyType;
-
-        const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, erzwingeNeuladen);
-        const fleet = baueFleetMitTyp(fleetMitLive, detailsMap, kategorieLabel, await fetchUrlaubsSperren());
 
         // WICHTIG: passende bleibt bewusst UNGEFILTERT nach Zielort - die
         // Ketten-Suche braucht genau diese Breite, um Zwischenetappen zu
         // finden. Die eigentliche Ziel-Filterung für Direkt-Routen und
         // Bündel passiert jetzt INNERHALB findeBesteRoutenProFahrzeug.
         const passende = filtereNachAufbau(angebote, kategorieLabel);
-        const kompatibleFleetVollstaendig = fleet.filter(f => f.typ === kategorieLabel);
         const inkompatibleFleet = fleet.filter(f => f.typ !== kategorieLabel);
         // "Zurück zur Firma" schränkt die Suche auf genau das gewählte
         // Fahrzeug ein, statt wie sonst alle kompatiblen Fahrzeuge zu prüfen.
@@ -3680,7 +3697,7 @@
           : kompatibleFleetVollstaendig;
 
         // Nur WARNUNGEN anzeigen (kein Cache-/Anzahl-/Seiten-Gerede)
-        let infoHtml = '';
+        let infoHtml = urlaubsFahrzeuge.map(f => `<div class="fi-dash-row fi-muted">⏭ ${f.name.split(' · ')[0]}: übersprungen wegen Urlaub</div>`).join('');
         if (onlyReturnCb.checked && !firmenStandort) {
           infoHtml += `<div class="fi-dash-row fi-warn">⚠ Firmenstandort konnte nicht ermittelt werden - "Zurück zur Firma" wird ignoriert.</div>`;
         }
@@ -3703,7 +3720,10 @@
 
         let html = infoHtml ? `<div class="fi-dash-card" style="grid-column: 1 / -1;">${infoHtml}</div>` : '';
 
-        if (!passende.length) {
+        if (marktUebersprungen) {
+          konsole.ende('Fertig');
+          if (!urlaubsFahrzeuge.length) html += '<div class="fi-empty">Kein Fahrzeug mit passendem Typ für diese Kategorie gefunden.</div>';
+        } else if (!passende.length) {
           html += '<div class="fi-empty">Keine passenden Angebote gefunden.</div>';
         } else if (!kompatibleFleet.length) {
           html += '<div class="fi-empty">Kein Fahrzeug mit passendem Typ für diese Kategorie gefunden.</div>';
@@ -4364,6 +4384,16 @@
       }
 
       fleet = fleet.filter(f => !gesperrteFahrzeuge.has(String(f.status.vehicleId)));
+      // Urlaub: Fahrzeuge, die im Planungsfenster nicht startklar werden, gar nicht erst für den Markt-Scan vormerken
+      fleet = fleet.filter(f => {
+        if (!urlaubBlockiert(f)) return true;
+        const id = String(f.status.vehicleId);
+        if (!urlaubGeloggt.has(id) && (!nurKategorie || f.typ === nurKategorie)) {
+          urlaubGeloggt.add(id);
+          log(`⏭ ${f.name.split(' · ')[0]}: übersprungen wegen Urlaub`, 'fi-muted');
+        }
+        return false;
+      });
       const kategorien = [...new Set(fleet.map(f => f.typ))].filter(k => !nurKategorie || k === nurKategorie);
       const zuweisungen = [];
       schritteGesamt += kategorien.length + 1;
