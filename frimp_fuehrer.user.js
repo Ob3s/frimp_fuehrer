@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.96
+// @version      0.30.0
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.96';
+  const SCRIPT_VERSION = '0.30.0';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2976,6 +2976,49 @@
   }
 
   /**
+   * Gehalt und Einstellungsdatum jedes Mitarbeiters (staff.php, gleicher Abruf wie die Urlaube -
+   * der Zwischenspeicher liefert ihn ohne neue Anfrage).
+   * @returns {Promise<{gehalt: number, seit: Date}[]>}
+   */
+  async function fetchPersonalGehaltsdaten() {
+    const liste = [];
+    try {
+      const res = await fiFetch('/game/staff.php', { credentials: 'same-origin', cache: 'no-store' });
+      const doc = safeParseHtml(await res.text());
+      doc.querySelectorAll('article').forEach(card => {
+        const t = card.textContent.replace(/\s+/g, ' ');
+        const g = /Gehalt\s*([\d.]+,\d{2}) €/.exec(t);
+        const m = /Im Team seit\s*(\d{2})\.(\d{2})\.(\d{4})/.exec(t);
+        if (g && m) liste.push({ gehalt: parseFloat(g[1].replace(/\./g, '').replace(',', '.')), seit: new Date(+m[3], +m[2] - 1, +m[1]) });
+      });
+    } catch (e) {
+      console.warn('[FI-Helper] Personaldaten konnten nicht geladen werden', e);
+    }
+    return liste;
+  }
+
+  /**
+   * Voraussichtliche Gehaltsabrechnung zum Termin: Die Abrechnung am 28. gilt für den Kalendermonat des
+   * Termins (28.10. -> "2026-10"). Wer VOR diesem Monat eingestellt wurde, bekommt das volle Gehalt, wer im
+   * Monat eingestellt wurde, anteilig: (Tage im Monat - Einstellungstag + 1) / Tage im Monat (am 28.10.
+   * auf den Cent bestätigt: 68.906,45 gerechnet vs. 68.906,46 gebucht). Wer erst nach dem Termin kommt, zählt nicht.
+   * @returns {{summe: number, voll: number, anteilig: number}}
+   */
+  function prognostiziereGehaltsabrechnung(personal, termin) {
+    const monatsanfang = new Date(termin.getFullYear(), termin.getMonth(), 1);
+    const tageImMonat = new Date(termin.getFullYear(), termin.getMonth() + 1, 0).getDate();
+    let summe = 0, voll = 0, anteilig = 0;
+    personal.forEach(p => {
+      if (p.seit > termin) return;
+      voll += p.gehalt;
+      const anteil = p.seit >= monatsanfang ? (tageImMonat - p.seit.getDate() + 1) / tageImMonat : 1;
+      if (anteil < 1) anteilig++;
+      summe += p.gehalt * anteil;
+    });
+    return { summe, voll, anteilig };
+  }
+
+  /**
    * Prüft, ob eine Tour mit einem bevorstehenden Urlaub kollidiert: Die Tour (Start bis Rückkehr samt
    * Heimfahrt, Schätzung mit 20 % Zuschlag für Pausen) darf den Urlaubszeitraum [Beginn 00:00 des
    * ersten Tages, Ende 23:59 des letzten Tages] nicht überschneiden - sie muss VOR Urlaubsbeginn am
@@ -3294,7 +3337,13 @@
         const std = basis ? [basis.getHours(), basis.getMinutes()] : [0, 1];
         let kand = new Date(new Date().getFullYear(), new Date().getMonth(), tag, std[0], std[1]);
         if (kand.getTime() <= jetzt) kand = new Date(kand.getFullYear(), kand.getMonth() + 1, tag, std[0], std[1]);
-        gehalt = { art: 'gehalt', datum: kand, betrag: z.gehalt, tag, std };
+        gehalt = { art: 'gehalt', datum: kand, betrag: z.gehalt, tag, std, prognose: null };
+        // Genauer als die Monatssumme der Bank: Neueinstellungen im Abrechnungsmonat werden anteilig abgerechnet
+        const personal = await fetchPersonalGehaltsdaten();
+        if (personal.length) {
+          gehalt.prognose = prognostiziereGehaltsabrechnung(personal, kand);
+          gehalt.betrag = gehalt.prognose.summe;
+        }
       }
 
       // Alle anstehenden Zahlungen chronologisch durchrechnen
@@ -3333,9 +3382,11 @@
         const tipText = [
           `Gehaltsabrechnung monatlich (abgebucht am ${gehalt.tag}. um ${String(gehalt.std[0]).padStart(2, '0')}:${String(gehalt.std[1]).padStart(2, '0')}).`,
           z.letztesGehalt ? `Zuletzt ${z.letztesGehalt.datum.toLocaleDateString('de-DE')}: ${fmtEuro(z.letztesGehalt.betrag)}.` : '',
-          `Aktuelle Monatsgehälter: ${fmtEuro(z.gehalt)} (die Abrechnung kann anteilig abweichen, z. B. bei Neueinstellungen).`,
+          gehalt.prognose
+            ? `Voller Monat: ${fmtEuro(gehalt.prognose.voll)}${gehalt.prognose.anteilig ? ` · ${gehalt.prognose.anteilig} Neueinstellung(en) dieses Monats anteilig` : ''}.`
+            : `Aktuelle Monatsgehälter: ${fmtEuro(z.gehalt)} (die Abrechnung kann anteilig abweichen, z. B. bei Neueinstellungen).`,
         ].filter(Boolean).join('\n') + fehltText(gehalt);
-        html += `<a class="fi-dash-pill${gehalt.fehlt ? ' is-negative' : ''}" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tip(tipText)}">👥 ${gehalt.datum.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })} · ~${eur(z.gehalt)} <span style="${gehalt.fehlt ? '' : 'color:#9aa5b8; '}font-weight:600;">in ${inTagen(gehalt.datum)} T</span></a>`;
+        html += `<a class="fi-dash-pill${gehalt.fehlt ? ' is-negative' : ''}" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tip(tipText)}">👥 ${gehalt.datum.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })} · ${gehalt.prognose ? '' : '~'}${eur(gehalt.betrag)} <span style="${gehalt.fehlt ? '' : 'color:#9aa5b8; '}font-weight:600;">in ${inTagen(gehalt.datum)} T</span></a>`;
       }
       el.innerHTML = html;
     }
