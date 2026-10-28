@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.93
+// @version      0.29.94
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.93';
+  const SCRIPT_VERSION = '0.29.94';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -4448,14 +4448,17 @@
    */
   async function fuehreBefuellPlanAus({ plan, log, fortschritt, abgebrochen }) {
     let gebucht = 0, fehler = 0, summe = 0;
-    const gesperrt = new Set();
+    const gesperrt = new Map(); // vehicleId -> Grund ('urlaub' = stillschweigend überspringen)
     const echtesFreiAb = new Map();
     for (let i = 0; i < plan.length; i++) {
       if (abgebrochen()) { log('⏹ Vom Nutzer gestoppt.', 'fi-warn'); break; }
       const z = plan[i];
       const kurz = z.fahrzeugName.split(' · ')[0];
       fortschritt({ schritt: i + 1, gesamt: plan.length, text: `Buche ${kurz}` });
-      if (gesperrt.has(String(z.vehicleId))) { log(`⏭ ${kurz}: übersprungen (vorherige Buchung dieses Fahrzeugs scheiterte)`, 'fi-muted'); continue; }
+      if (gesperrt.has(String(z.vehicleId))) {
+        if (gesperrt.get(String(z.vehicleId)) !== 'urlaub') log(`⏭ ${kurz}: übersprungen (vorherige Buchung dieses Fahrzeugs scheiterte)`, 'fi-muted');
+        continue;
+      }
       const freiAb = echtesFreiAb.get(String(z.vehicleId)) ?? new Date(z.freiAbMs);
       try {
         await nimmFrachtAnUndPlaneEin(z.jobId, z.vehicleId, freiAb, new Date(z.beladungMs), z.fahrzeugName);
@@ -4465,15 +4468,20 @@
         if (plan.slice(i + 1).some(x => String(x.vehicleId) === String(z.vehicleId))) {
           const st = await fetchVehicleStatus(z.vehicleId);
           if (!st?.freiAbZeit || st.freiAbZeit.getTime() <= freiAb.getTime()) {
-            gesperrt.add(String(z.vehicleId));
+            gesperrt.set(String(z.vehicleId), 'frei-ab');
             log(`⚠ ${kurz}: neues "frei ab" nicht lesbar - weitere Touren dieses Fahrzeugs übersprungen`, 'fi-warn');
           } else {
             echtesFreiAb.set(String(z.vehicleId), st.freiAbZeit);
           }
         }
       } catch (e) {
+        if (/Urlaub/i.test(e.message)) { // Spiel lehnt wegen Urlaub eines Fahrers ab: kein Fehler, nur übersprungen
+          gesperrt.set(String(z.vehicleId), 'urlaub');
+          log(`⏭ ${kurz}: übersprungen wegen Urlaub`, 'fi-muted');
+          continue;
+        }
         fehler++;
-        gesperrt.add(String(z.vehicleId));
+        gesperrt.set(String(z.vehicleId), 'fehler');
         log(`❌ ${kurz}: ${z.beschreibung.split(' · ')[0].replace(/^[^:]+: /, '')} fehlgeschlagen: ${e.message}`, 'fi-bad');
         console.error('[FI-Helper] Plan-Buchung fehlgeschlagen', z, e);
       }
