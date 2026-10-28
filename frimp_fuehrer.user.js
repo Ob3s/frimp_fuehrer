@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.30.0
+// @version      0.31.0
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.30.0';
+  const SCRIPT_VERSION = '0.31.0';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2976,6 +2976,44 @@
   }
 
   /**
+   * Genehmigt einen offenen Urlaubsantrag direkt aus dem Info-Feld (statt über den Posteingang): Die
+   * Personal-Nachricht (inbox.php?filter=personnel) enthält das Formular "Urlaub genehmigen". Es wird zur
+   * Laufzeit gelesen und samt seiner Felder (CSRF-Token, Nachricht, Aktion) abgeschickt. Läuft NUR auf
+   * ausdrücklichen Klick des Nutzers. Das Spiel lehnt bei Überschneidung mit einer Tour selbst ab.
+   * @returns {Promise<string>} Status laut Spiel ("Genehmigt", "Abgelehnt", ...)
+   */
+  async function genehmigeUrlaubsantrag(fahrer, von) {
+    const datum = von.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const nachrichtVon = (doc, knopf) => {
+      let el = knopf ? knopf.parentElement : doc.body;
+      const passt = e => /Urlaubsantrag/.test(e.textContent) && e.textContent.includes(fahrer)
+        && e.textContent.replace(/\s+/g, '').includes(`Beginn${datum}`);
+      while (el && !passt(el)) el = el.parentElement;
+      return el;
+    };
+    const res = await fiFetch('/game/inbox.php?filter=personnel', { credentials: 'same-origin', cache: 'no-store' });
+    const doc = safeParseHtml(await res.text());
+    const knopf = [...doc.querySelectorAll('button')].find(b => /Urlaub genehmigen/i.test(b.textContent) && nachrichtVon(doc, b));
+    if (!knopf) throw new Error('Antrag nicht mehr offen');
+    const form = knopf.closest('form');
+    if (!form) throw new Error('Formular nicht gefunden');
+    const body = new URLSearchParams();
+    new FormData(form).forEach((v, k) => { if (typeof v === 'string') body.append(k, v); });
+    if (knopf.name) body.set(knopf.name, knopf.value);
+    const ziel = new URL(knopf.getAttribute('formaction') || form.getAttribute('action') || '/game/inbox.php?filter=personnel', `${location.origin}/game/`).href;
+    // fiLesend: die Genehmigung ändert weder Fahrzeugpläne noch Markt - der Speicher bleibt, nur Personal/Posteingang werden neu gelesen
+    const r2 = await fiFetch(ziel, { method: 'POST', body, credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, fiLesend: true });
+    fiGetSpeicher.delete('/game/staff.php');
+    fiGetSpeicher.delete('/game/inbox.php?filter=personnel');
+    const d2 = safeParseHtml(await r2.text());
+    const fehler = d2.querySelector('.flash.error')?.textContent.replace(/\s+/g, ' ').trim();
+    if (fehler) throw new Error(fehler);
+    const nachricht = nachrichtVon(d2, null);
+    return /Urlaubsantrag\s*(Genehmigt|Abgelehnt|Entscheidung offen)/i.exec((nachricht ?? d2.body).textContent.replace(/\s+/g, ' '))?.[1]
+      ?? d2.querySelector('.flash.success')?.textContent.replace(/\s+/g, ' ').trim() ?? 'Genehmigt';
+  }
+
+  /**
    * Gehalt und Einstellungsdatum jedes Mitarbeiters (staff.php, gleicher Abruf wie die Urlaube -
    * der Zwischenspeicher liefert ihn ohne neue Anfrage).
    * @returns {Promise<{gehalt: number, seit: Date}[]>}
@@ -3317,6 +3355,29 @@
     await aktualisiereKopf();
     starteAbrufAnzeige();
 
+    // Urlaubsantrag direkt genehmigen (Chip im Info-Feld)
+    document.getElementById('fi-dashboard').addEventListener('click', async ev => {
+      const knopf = ev.target.closest('.fi-urlaub-ok');
+      if (!knopf || knopf.disabled) return;
+      const vorher = knopf.innerHTML;
+      knopf.disabled = true;
+      knopf.textContent = '… genehmige';
+      try {
+        const status = await genehmigeUrlaubsantrag(knopf.dataset.fahrer, new Date(Number(knopf.dataset.von)));
+        const ok = /genehmigt/i.test(status);
+        knopf.classList.toggle('is-warn', false);
+        knopf.classList.toggle('is-negative', !ok);
+        knopf.textContent = ok ? `✓ Urlaub ${knopf.dataset.fahrer.split(' ').pop()} genehmigt` : `✗ ${status}`;
+      } catch (e) {
+        console.error('[FI-Helper] Urlaub genehmigen fehlgeschlagen', e);
+        knopf.disabled = false;
+        knopf.innerHTML = vorher;
+        knopf.classList.add('is-negative');
+        knopf.setAttribute('data-fi-tip', `Genehmigen fehlgeschlagen: ${e.message.replace(/"/g, '&quot;')}\nKlick versucht es erneut.`);
+        knopf.insertAdjacentText('beforeend', ' ✗');
+      }
+    });
+
     // --- Mini-Übersicht: Kreditraten (je Tag gebündelt) + Gehalt, nur 7 Tage vorher ---
     // Reicht das Geld nicht, wird genau die Zahlung rot markiert, die nicht mehr gedeckt ist:
     // der Kontostand wird der Reihe nach (nach Fälligkeit) belastet; was noch passt, bleibt normal.
@@ -3498,7 +3559,7 @@
       [...urlaubsSperren.entries()]
         .flatMap(([fzName, liste]) => liste.filter(u => u.bis > new Date() && /offen/i.test(u.status)).map(u => ({ fzName, ...u })))
         .forEach(u => {
-          html += `<a class="fi-dash-pill is-warn" href="/game/staff.php" style="text-decoration:none;" data-fi-tip="${tipText(`Urlaubsantrag ${u.fahrer} (${u.fzName.split(' · ')[0]}): ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')}\nNoch offen - die Planung behandelt ihn schon wie genehmigt.`)}">🌴 Antrag ${u.fahrer.split(' ').pop()} · ${kurz(u.von)}–${kurz(u.bis)}</a>`;
+          html += `<button type="button" class="fi-dash-pill is-warn fi-urlaub-ok" style="cursor:pointer;" data-fahrer="${u.fahrer}" data-von="${u.von.getTime()}" data-fi-tip="${tipText(`Urlaubsantrag ${u.fahrer} (${u.fzName.split(' · ')[0]}): ${u.von.toLocaleDateString('de-DE')}–${u.bis.toLocaleDateString('de-DE')}\nNoch offen - die Planung behandelt ihn schon wie genehmigt.\nKlick genehmigt den Antrag.`)}">🌴 Antrag ${u.fahrer.split(' ').pop()} · ${kurz(u.von)}–${kurz(u.bis)} · ✔ genehmigen</button>`;
         });
 
       // Die einzelnen Fahrzeugkarten sind auf Wunsch entfallen (die Timeline zeigt
