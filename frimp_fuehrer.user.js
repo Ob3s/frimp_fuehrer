@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.92
+// @version      0.29.93
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.92';
+  const SCRIPT_VERSION = '0.29.93';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2957,7 +2957,7 @@
       const doc = safeParseHtml(await res.text());
       doc.querySelectorAll('article').forEach(card => {
         const t = card.innerText.replace(/\s+/g, ' ').trim();
-        const m = /Urlaub(?:santrag)?\s+([A-Za-zäöüß]+)\s*·\s*(\d{2})\.(\d{2})\.\s*[–-]\s*(\d{2})\.(\d{2})\.(\d{4})/.exec(t);
+        const m = /Urlaub(?:santrag)?(?:\s+([A-Za-zäöüß]+))?\s*·\s*(\d{2})\.(\d{2})\.\s*[–-]\s*(\d{2})\.(\d{2})\.(\d{4})/.exec(t);
         const fz = /Fahrzeug\s+(.+?)\s+eingesetzt/.exec(t);
         if (!m || !fz) return;
         const jahrEnde = parseInt(m[6], 10);
@@ -2966,7 +2966,7 @@
         const bis = new Date(jahrEnde, parseInt(m[5], 10) - 1, parseInt(m[4], 10), 23, 59, 59);
         const fahrer = /^(.+?)\s+(?:Fahrer|Disponent)\b/.exec(t)?.[1] ?? 'Fahrer';
         const liste = sperren.get(fz[1].trim()) ?? [];
-        liste.push({ fahrer, von, bis, status: m[1] });
+        liste.push({ fahrer, von, bis, status: m[1] ?? 'läuft' }); // laufender Urlaub steht als "Im Urlaub · ..." (ohne Statuswort)
         sperren.set(fz[1].trim(), liste);
       });
     } catch (e) {
