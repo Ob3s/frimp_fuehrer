@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.29.95
+// @version      0.29.96
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.29.95';
+  const SCRIPT_VERSION = '0.29.96';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3012,7 +3012,7 @@
     if (!frei) return fahrzeug;
     const u = (fahrzeug.urlaub ?? []).filter(x => x.bis > new Date()).find(x => frei >= x.von && frei <= x.bis);
     if (!u) return fahrzeug;
-    const rueckkehr = u.bis.getTime() + 1000;
+    const rueckkehr = u.bis.getTime() + 1000 + 5 * 60 * 1000; // Urlaub endet 23:59:59 - Start 5 Min. nach Mitternacht als Sicherheitsabstand
     const inFirma = frei.getTime() + heimfahrtStunden(fahrzeug, fahrzeug.status?.freiAbOrt) * 3600 * 1000;
     const regeln = LENKZEIT_REGELN[fahrzeug.live?.drivers?.length ?? 1] || LENKZEIT_REGELN[1];
     return {
