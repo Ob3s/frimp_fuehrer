@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.31.0
+// @version      0.31.1
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.31.0';
+  const SCRIPT_VERSION = '0.31.1';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2984,12 +2984,12 @@
    */
   async function genehmigeUrlaubsantrag(fahrer, von) {
     const datum = von.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    // Die Nachricht = kleinstes umgebendes Element, das "Urlaubsantrag" und den Fahrer enthält; nur DORT muss der Beginn stimmen
+    // (sonst würde ein größerer Container mit mehreren Anträgen jeden Knopf passend machen).
     const nachrichtVon = (doc, knopf) => {
       let el = knopf ? knopf.parentElement : doc.body;
-      const passt = e => /Urlaubsantrag/.test(e.textContent) && e.textContent.includes(fahrer)
-        && e.textContent.replace(/\s+/g, '').includes(`Beginn${datum}`);
-      while (el && !passt(el)) el = el.parentElement;
-      return el;
+      while (el && !(/Urlaubsantrag/.test(el.textContent) && el.textContent.includes(fahrer))) el = el.parentElement;
+      return el && el.textContent.replace(/\s+/g, '').includes(`Beginn${datum}`) ? el : null;
     };
     const res = await fiFetch('/game/inbox.php?filter=personnel', { credentials: 'same-origin', cache: 'no-store' });
     const doc = safeParseHtml(await res.text());
@@ -3008,9 +3008,10 @@
     const d2 = safeParseHtml(await r2.text());
     const fehler = d2.querySelector('.flash.error')?.textContent.replace(/\s+/g, ' ').trim();
     if (fehler) throw new Error(fehler);
-    const nachricht = nachrichtVon(d2, null);
-    return /Urlaubsantrag\s*(Genehmigt|Abgelehnt|Entscheidung offen)/i.exec((nachricht ?? d2.body).textContent.replace(/\s+/g, ' '))?.[1]
-      ?? d2.querySelector('.flash.success')?.textContent.replace(/\s+/g, ' ').trim() ?? 'Genehmigt';
+    // Status der Nachricht: letztes "Urlaubsantrag<Status>" VOR "Beginn<Datum>" (die Statusmarke steht im Kopf der Nachricht)
+    const text = d2.body.textContent.replace(/\s+/g, '');
+    const treffer = [...text.slice(0, Math.max(0, text.indexOf(`Beginn${datum}`))).matchAll(/Urlaubsantrag(Genehmigt|Abgelehnt|Entscheidungoffen)/gi)].pop();
+    return treffer?.[1] ?? d2.querySelector('.flash.success')?.textContent.replace(/\s+/g, ' ').trim() ?? 'Genehmigt';
   }
 
   /**
@@ -3367,7 +3368,7 @@
         const ok = /genehmigt/i.test(status);
         knopf.classList.toggle('is-warn', false);
         knopf.classList.toggle('is-negative', !ok);
-        knopf.textContent = ok ? `✓ Urlaub ${knopf.dataset.fahrer.split(' ').pop()} genehmigt` : `✗ ${status}`;
+        knopf.textContent = ok ? `✓ Urlaub ${knopf.dataset.fahrer.split(' ').pop()} genehmigt` : (/offen/i.test(status) ? '✗ Antrag noch offen' : `✗ Antrag ${status.toLowerCase()}`);
       } catch (e) {
         console.error('[FI-Helper] Urlaub genehmigen fehlgeschlagen', e);
         knopf.disabled = false;
