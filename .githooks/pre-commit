@@ -1,5 +1,5 @@
 #!/bin/sh
-# Zählt automatisch die @version-Patch-Nummer im Userscript-Header hoch,
+# Zählt automatisch die @version im Userscript-Header hoch (Standard: Patch-Nummer; BUMP=minor/major siehe unten),
 # sobald frimp_fuehrer.user.js Teil eines Commits ist. Tampermonkey
 # erkennt Updates nur über @version - ohne Bump würde @updateURL nie ein
 # neues Update anbieten, egal wie oft wir pushen.
@@ -29,7 +29,13 @@ CURRENT_VERSION=$(echo "$NEW_VERSION_LINE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
 MAJOR=$(echo "$CURRENT_VERSION" | cut -d. -f1)
 MINOR=$(echo "$CURRENT_VERSION" | cut -d. -f2)
 PATCH=$(echo "$CURRENT_VERSION" | cut -d. -f3)
-NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+# Stufe per Umgebungsvariable: BUMP=minor (neue Funktion) bzw. BUMP=major (großer Umbau),
+# Standard = Patch (Fehlerbehebung/Kleinkram).
+case "${BUMP:-patch}" in
+  major) NEW_VERSION="$((MAJOR + 1)).0.0" ;;
+  minor) NEW_VERSION="$MAJOR.$((MINOR + 1)).0" ;;
+  *)     NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))" ;;
+esac
 
 sed -i \
   -e "s/\(@version[[:space:]]*\)$CURRENT_VERSION/\1$NEW_VERSION/" \

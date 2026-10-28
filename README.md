@@ -28,9 +28,15 @@ Baut auf `/game/active_tours.php` ein eigenständiges "Cockpit"-Dashboard, das:
 Tampermonkey erkennt ein verfügbares Update nur über eine geänderte `@version`
 im Script-Header. Ein `pre-commit`-Hook (`.githooks/pre-commit`) erhöht die
 Patch-Version deshalb automatisch bei jedem Commit, der
-`frimp_fuehrer.user.js` verändert. Für einen bewussten Minor-/Major-
-Sprung (z.B. `0.29.0` → `0.30.0`) einfach die `@version`-Zeile selbst im
-Commit anpassen – der Hook erkennt das und bumpt dann nicht zusätzlich.
+`frimp_fuehrer.user.js` verändert (Fehlerbehebung/Kleinkram). Für eine neue
+Funktion bzw. einen großen Umbau die Stufe angeben:
+
+```bash
+BUMP=minor git commit -m "..."   # 0.29.96 -> 0.30.0
+BUMP=major git commit -m "..."   # 0.30.0  -> 1.0.0
+```
+
+Alternativ die `@version`-Zeile selbst im Commit anpassen – der Hook bumpt dann nicht zusätzlich.
 
 Einmalig nach jedem frischen `git clone` aktivieren:
 
