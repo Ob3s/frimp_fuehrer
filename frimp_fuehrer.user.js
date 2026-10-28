@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.31.1
+// @version      0.32.0
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.31.1';
+  const SCRIPT_VERSION = '0.32.0';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3356,6 +3356,16 @@
     await aktualisiereKopf();
     starteAbrufAnzeige();
 
+    // Update-Knopf: 1. Klick öffnet die Installation, 2. Klick lädt die Seite neu
+    document.getElementById('fi-dashboard').addEventListener('click', ev => {
+      const knopf = ev.target.closest('.fi-update');
+      if (!knopf) return;
+      if (knopf.dataset.geoeffnet) { window.location.reload(); return; }
+      knopf.dataset.geoeffnet = '1';
+      knopf.textContent = '↻ Nach Update: Seite neu laden';
+      window.open(UPDATE_URL, '_blank');
+    });
+
     // Urlaubsantrag direkt genehmigen (Chip im Info-Feld)
     document.getElementById('fi-dashboard').addEventListener('click', async ev => {
       const knopf = ev.target.closest('.fi-urlaub-ok');
@@ -3461,6 +3471,47 @@
     // Fetch-Anzahl niedrig halten).
     let flotteFuerAuswahl = [];
     let flottenKategorien = null; // Frachtkategorien, die mit den vorhandenen Fahrzeugen bedient werden können
+    // Update-Hinweis: liest nur den Kopf der Skriptdatei im Repo (main), vergleicht @version mit der laufenden
+    // Version und zeigt bei einer neueren einen Knopf. Klick öffnet die .user.js - Tampermonkey zeigt dann
+    // seine Installationsseite (ein Klick auf "Aktualisieren"); ein zweiter Klick lädt die Seite neu.
+    const UPDATE_URL = 'https://raw.githubusercontent.com/Ob3s/frimp_fuehrer/main/frimp_fuehrer.user.js';
+    let neueVersion = null;
+    let letzterUpdateCheck = 0;
+    const istNeuer = (a, b) => {
+      const x = a.split('.').map(Number), y = b.split('.').map(Number);
+      for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+      return false;
+    };
+    const updateChipHtml = () => neueVersion
+      ? `<button type="button" class="fi-dash-pill is-positive fi-update" style="cursor:pointer;" data-fi-tip="Neue Version v${neueVersion} verfügbar (läuft: v${SCRIPT_VERSION}).&#10;Klick öffnet die Installation in Tampermonkey - dort &quot;Aktualisieren&quot; bestätigen, danach hier erneut klicken (lädt die Seite neu).">⬆ Update v${neueVersion}</button>`
+      : '';
+    async function pruefeUpdate() {
+      if (Date.now() - letzterUpdateCheck < 10 * 60 * 1000) return;
+      letzterUpdateCheck = Date.now();
+      try {
+        const res = await fetch(`${UPDATE_URL}?t=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' });
+        if (!res.ok || !res.body) return;
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let kopf = '';
+        while (!kopf.includes('==/UserScript==') && kopf.length < 20000) { // nur den Kopf lesen, den Rest nicht laden
+          const { done, value } = await reader.read();
+          if (done) break;
+          kopf += dec.decode(value, { stream: true });
+        }
+        reader.cancel().catch(() => {});
+        const v = kopf.match(/@version\s+(\d+\.\d+\.\d+)/)?.[1];
+        if (v && istNeuer(v, SCRIPT_VERSION) && v !== neueVersion) {
+          neueVersion = v;
+          const chips = document.getElementById('fi-info-chips');
+          if (chips && !chips.querySelector('.fi-update')) chips.insertAdjacentHTML('afterbegin', updateChipHtml());
+        }
+      } catch (e) {
+        console.warn('[FI-Helper] Update-Prüfung nicht möglich', e);
+      }
+    }
+    pruefeUpdate();
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) pruefeUpdate(); });
     let kategorienFertig = null;
     const kategorienPromise = new Promise(r => { kategorienFertig = r; });
     async function aktualisiereFlotte() {
@@ -3568,7 +3619,7 @@
       // Verschleiß/HU-Warnung oben.
       const kopfEl = infoEl.parentElement; // infoEl selbst ist display:contents (hat keine Box -> nicht beobachtbar)
       if (kopfEl && !kopfEl.dataset.gesehen) startWennSichtbar(kopfEl);
-      infoEl.innerHTML = html;
+      infoEl.innerHTML = updateChipHtml() + html;
 
       // --- Timeline: alle Fahrzeuge auf einen Blick (wie der spieleigene
       // Dispositionsplan, nur alle Fahrzeuge übereinander statt einzeln) ---
