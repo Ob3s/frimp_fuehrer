@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.32.0
+// @version      0.32.1
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.32.0';
+  const SCRIPT_VERSION = '0.32.1';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -4607,7 +4607,15 @@
           const beschreibung = `${fahrzeugName.split(' · ')[0]}: ${fracht.startOrt} → ${fracht.zielOrt} · ${fmtEuro(fracht.verguetungEuro ?? 0)} · ${bewertung.effektivProKm.toFixed(2).replace('.', ',')} €/km · Leerfahrt ${Math.round(bewertung.anfahrtKm)} km${bewertung.heimfahrtKm > 0 ? ` · 🏠 ${Math.round(bewertung.heimfahrtKm)} km` : ''}`;
           if (trocken) {
             const f = fleet.find(x => String(x.status.vehicleId) === String(z.eintrag.vehicleId));
-            f.status = { ...f.status, freiAbZeit: bewertung.ankunftZeit, freiAbOrt: fracht.zielOrt };
+            f.status = {
+              ...f.status, freiAbZeit: bewertung.ankunftZeit, freiAbOrt: fracht.zielOrt,
+              // Rest-Lenk-/Schichtzeit NACH diesem Auftrag mitnehmen - sonst "vergisst" die
+              // Simulation beim Verketten mehrerer Aufträge für dasselbe Fahrzeug, dass der
+              // Fahrer schon welche verbraucht hat, und eine fällige Pflicht-Schichtpause
+              // (9-11 h) fehlt in der Prognose für den nächsten Auftrag (siehe Chat).
+              fahrerRestOverride: (bewertung.fahrerRestLenkEnde != null && bewertung.fahrerRestSchichtEnde != null)
+                ? { restLenkzeitStunden: bewertung.fahrerRestLenkEnde, restSchichtzeitStunden: bewertung.fahrerRestSchichtEnde } : undefined,
+            };
             log(`▸ ${beschreibung}`, 'fi-good');
             plan.push({
               vehicleId: z.eintrag.vehicleId, fahrzeugName, jobId: fracht.jobId, verguetung: fracht.verguetungEuro ?? 0,
