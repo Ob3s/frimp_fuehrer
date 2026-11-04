@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.32.1
+// @version      0.32.2
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.32.1';
+  const SCRIPT_VERSION = '0.32.2';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -3158,6 +3158,11 @@
     return doc.querySelector('.flash.success')?.textContent.replace(/\s+/g, ' ').trim() ?? 'Rückruf ausgelöst';
   }
 
+  // Fahrzeuge, die nicht mehr beplant werden (z. B. vor dem Verkauf): keine Frachtangebote, kein Befüllen,
+  // kein Planungsbedarf-Marker. Laufende Touren bleiben im Tourenplan sichtbar.
+  const VON_PLANUNG_AUSGESCHLOSSEN = ['PL 01'];
+  const istVonPlanungAusgeschlossen = f => VON_PLANUNG_AUSGESCHLOSSEN.includes(String(f.name).split(' · ')[0].trim());
+
   function baueFleetMitTyp(fleetMitLive, detailsMap, fallbackLabel, urlaubNachFahrzeug = new Map()) {
     return fleetMitLive.map(f => {
       const details = f.status?.vehicleId ? detailsMap.get(String(f.status.vehicleId)) : null;
@@ -3540,7 +3545,7 @@
       };
       const [fleet, fuhrparkDetails] = await Promise.all([fetchFleetStatus(onListe, onFahrzeug), fetchFuhrparkDetails()]);
       flotteFuerAuswahl = fleet;
-      flottenKategorien = new Set(baueFleetMitTyp(fleet, fuhrparkDetails, null).map(f => f.typ).filter(Boolean));
+      flottenKategorien = new Set(baueFleetMitTyp(fleet, fuhrparkDetails, null).filter(f => !istVonPlanungAusgeschlossen(f)).map(f => f.typ).filter(Boolean));
       kategorienFertig?.();
 
       // Diagnose-Log (siehe Chat): zeigt in der Konsole (F12), ob der neue
@@ -3635,7 +3640,7 @@
         let naechsterPlanungsbedarf = null;
         fleet.forEach(entry => {
           const zeit = entry.status?.freiAbZeit;
-          if (!zeit) return;
+          if (!zeit || istVonPlanungAusgeschlossen(entry)) return;
           if (!naechsterPlanungsbedarf || zeit < naechsterPlanungsbedarf.zeit) {
             naechsterPlanungsbedarf = { zeit, name: entry.name, ort: entry.status.freiAbOrt };
           }
@@ -3818,7 +3823,7 @@
         // damit schon fest. Bleibt kein planbares Fahrzeug übrig, wird die Frachtbörse nicht gescannt.
         const kategorieLabel = options.find(o => o.value === bodyType)?.label ?? bodyType;
         const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, erzwingeNeuladen);
-        const fleet = baueFleetMitTyp(fleetMitLive, detailsMap, kategorieLabel, await fetchUrlaubsSperren());
+        const fleet = baueFleetMitTyp(fleetMitLive, detailsMap, kategorieLabel, await fetchUrlaubsSperren()).filter(f => !istVonPlanungAusgeschlossen(f));
         const urlaubsFahrzeuge = fleet.filter(f => f.typ === kategorieLabel && urlaubBlockiert(f));
         const kompatibleFleetVollstaendig = fleet.filter(f => f.typ === kategorieLabel && !urlaubsFahrzeuge.includes(f));
         const marktUebersprungen = !kompatibleFleetVollstaendig.length;
@@ -4530,7 +4535,7 @@
       } else {
         const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, false); // Speicher nutzen: gleiche Daten wie die Frachtart-Berechnung
         fleet = baueFleetMitTyp(fleetMitLive, detailsMap, null, await fetchUrlaubsSperren())
-          .filter(f => f.typ && f.status?.vehicleId && f.status?.freiAbOrt && f.status?.freiAbZeit);
+          .filter(f => f.typ && f.status?.vehicleId && f.status?.freiAbOrt && f.status?.freiAbZeit && !istVonPlanungAusgeschlossen(f));
         if (trocken) simulierteFlotte = fleet;
       }
 
