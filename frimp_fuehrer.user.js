@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.32.2
+// @version      0.32.3
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.32.2';
+  const SCRIPT_VERSION = '0.32.3';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2964,6 +2964,7 @@
         const jahrStart = parseInt(m[3], 10) > parseInt(m[5], 10) ? jahrEnde - 1 : jahrEnde;
         const von = new Date(jahrStart, parseInt(m[3], 10) - 1, parseInt(m[2], 10), 0, 0, 0);
         const bis = new Date(jahrEnde, parseInt(m[5], 10) - 1, parseInt(m[4], 10), 23, 59, 59);
+        if (/gescheitert|abgelehnt|storniert|abgebrochen|fehlgeschlagen/i.test(m[1] ?? '')) return; // gescheiterter/abgelehnter Urlaub findet nicht statt
         const fahrer = /^(.+?)\s+(?:Fahrer|Disponent)\b/.exec(t)?.[1] ?? 'Fahrer';
         const liste = sperren.get(fz[1].trim()) ?? [];
         liste.push({ fahrer, von, bis, status: m[1] ?? 'läuft' }); // laufender Urlaub steht als "Im Urlaub · ..." (ohne Statuswort)
@@ -3109,12 +3110,19 @@
     };
   }
 
+  /** Läuft gerade ein Urlaub (von <= jetzt <= bis) in der Urlaubsliste eines Fahrzeugs? */
+  function urlaubLaeuftJetzt(urlaubsListe) {
+    const jetzt = new Date();
+    return (urlaubsListe ?? []).some(u => u.von <= jetzt && u.bis > jetzt);
+  }
+
   /**
    * Urlaub macht jede Planung dieses Fahrzeugs im Planungsfenster unmöglich: Der Fahrer ist noch nicht zurück
    * und die Abholung in der Firma samt Rückkehr liegt hinter dem Fenster. Steht schon nach dem Lesen von
    * staff.php + Fahrzeugstand fest - dafür muss die Frachtbörse nicht gescannt werden.
    */
   function urlaubBlockiert(fahrzeug) {
+    if (urlaubLaeuftJetzt(fahrzeug.urlaub)) return true; // ein Fahrer ist gerade im Urlaub: Fahrzeug wird gar nicht erst geplant
     const angepasst = mitUrlaubsRueckkehr(fahrzeug);
     if (angepasst === fahrzeug) return false;
     return angepasst.status.freiAbZeit.getTime() + aktuellerPlanungspuffer() * 3600 * 1000 > Date.now() + PLANUNGSFENSTER_STUNDEN * 3600 * 1000;
@@ -3640,7 +3648,7 @@
         let naechsterPlanungsbedarf = null;
         fleet.forEach(entry => {
           const zeit = entry.status?.freiAbZeit;
-          if (!zeit || istVonPlanungAusgeschlossen(entry)) return;
+          if (!zeit || istVonPlanungAusgeschlossen(entry) || urlaubLaeuftJetzt(urlaubsSperren.get(entry.name))) return;
           if (!naechsterPlanungsbedarf || zeit < naechsterPlanungsbedarf.zeit) {
             naechsterPlanungsbedarf = { zeit, name: entry.name, ort: entry.status.freiAbOrt };
           }
@@ -4515,7 +4523,7 @@
     // Jobs werden lokal aus dem Pool entfernt statt neu zu scannen.
     const marktPools = new Map(); // kategorieLabel -> FrachtAngebot[] (nur Komplettladungen)
     const letztesFreiAb = new Map(); // vehicleId -> "frei ab" (ms) zum Zeitpunkt der letzten Beplanung
-    const urlaubGeloggt = new Set();
+    const ohneTour = new Set(); // Fahrzeuge, für die nichts einplanbar war - der Markt wird nur kleiner, also nie wieder fragen
     const gesperrteFahrzeuge = new Set(); // Fahrzeuge, bei denen Annehmen/Einplanen scheiterte - nicht erneut versuchen (sonst häufen sich unverplante Aufträge)
 
     for (let runde = 1; runde <= MAX_RUNDEN; runde++) {
@@ -4552,17 +4560,8 @@
         break;
       }
 
-      fleet = fleet.filter(f => !gesperrteFahrzeuge.has(String(f.status.vehicleId)));
-      // Urlaub: Fahrzeuge, die im Planungsfenster nicht startklar werden, gar nicht erst für den Markt-Scan vormerken
-      fleet = fleet.filter(f => {
-        if (!urlaubBlockiert(f)) return true;
-        const id = String(f.status.vehicleId);
-        if (!urlaubGeloggt.has(id) && (!nurKategorie || f.typ === nurKategorie)) {
-          urlaubGeloggt.add(id);
-          log(`⏭ ${f.name.split(' · ')[0]}: übersprungen wegen Urlaub`, 'fi-muted');
-        }
-        return false;
-      });
+      // Gesperrte Fahrzeuge und solche, die schon "nichts einplanbar" ergaben, nicht erneut prüfen; Fahrzeuge im Urlaub still überspringen
+      fleet = fleet.filter(f => !gesperrteFahrzeuge.has(String(f.status.vehicleId)) && !ohneTour.has(String(f.status.vehicleId)) && !urlaubBlockiert(f));
       const kategorien = [...new Set(fleet.map(f => f.typ))].filter(k => !nurKategorie || k === nurKategorie);
       const zuweisungen = [];
       schritteGesamt += kategorien.length + 1;
@@ -4583,9 +4582,11 @@
         }
         const pool = marktPools.get(label);
         const kompatibleFleet = fleet.filter(f => f.typ === label);
-        if (!pool.length || !kompatibleFleet.length) continue;
+        if (!pool.length) { kompatibleFleet.forEach(f => ohneTour.add(String(f.status.vehicleId))); continue; }
+        if (!kompatibleFleet.length) continue;
 
         const beste = loeseFahrzeugKonflikte(await berechneBesteRouten(pool, kompatibleFleet, null, 0, konsole, { ketten: false, balken: false }));
+        const bekommenTour = new Set();
         beste.forEach(eintrag => {
           const k = eintrag.beste;
           if (!k || !k.fracht.jobId) return;
@@ -4595,7 +4596,9 @@
           if (b.kapazitaetOk === false) return;
           if (!(b.effektivProKm > 0)) return; // einzige Untergrenze: kein Verlustgeschäft
           zuweisungen.push({ label, eintrag, kandidat: k });
+          bekommenTour.add(String(eintrag.vehicleId));
         });
+        kompatibleFleet.forEach(f => { if (!bekommenTour.has(String(f.status.vehicleId))) ohneTour.add(String(f.status.vehicleId)); });
       }
 
       melde('Berechnen');
@@ -4684,7 +4687,6 @@
       } catch (e) {
         if (/Urlaub/i.test(e.message)) { // Spiel lehnt wegen Urlaub eines Fahrers ab: kein Fehler, nur übersprungen
           gesperrt.set(String(z.vehicleId), 'urlaub');
-          log(`⏭ ${kurz}: übersprungen wegen Urlaub`, 'fi-muted');
           continue;
         }
         fehler++;
