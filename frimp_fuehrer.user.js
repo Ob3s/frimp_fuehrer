@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.32.3
+// @version      0.32.4
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.32.3';
+  const SCRIPT_VERSION = '0.32.4';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -1512,7 +1512,7 @@
       const bewertungen = [...einzelBewertungen, ...bundleBewertungen, ...kettenBewertungen, ...mehrstufigeKettenBewertungen]
         .filter(istBuchbar)
         .filter(k => {
-          const grund = urlaubskonflikt(fahrzeug, k.fracht?.zielOrt, k.bewertung?.ankunftZeit);
+          const grund = urlaubskonflikt(fahrzeug, k.fracht?.zielOrt, k.bewertung?.ankunftZeit, undefined, k.bewertung);
           if (grund && !urlaubHinweis) urlaubHinweis = grund;
           return !grund;
         });
@@ -1586,7 +1586,7 @@
         folgeKandidaten.slice(0, FOLGE_PRUEFEN).forEach(({ f }) => {
           const bF = bewerteFrachtFuerFahrzeug(f, folgeStatus, frischeLive, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (!bF || bF.schaffbar === false || bF.deckungsbeitragEuro == null) return;
-          if (urlaubskonflikt(fahrzeug, f.zielOrt, bF.ankunftZeit, basis.ankunftZeit)) return;
+          if (urlaubskonflikt(fahrzeug, f.zielOrt, bF.ankunftZeit, basis.ankunftZeit, bF)) return;
           const paarKm = gesamtKmErster + bF.anfahrtKm + (f.entfernungKm ?? 0);
           if (paarKm <= 0) return;
           const paarEff = (basis.deckungsbeitragEuro + bF.deckungsbeitragEuro) / paarKm; // €/km über beide Aufträge
@@ -3067,21 +3067,32 @@
    * @param {Date} [startZeit] Beginn der Tour (Standard: "frei ab" des Fahrzeugs)
    * @returns {string|null} Begründung, falls unzulässig
    */
-  function urlaubskonflikt(fahrzeug, zielOrt, endeZeit, startZeit = fahrzeug.status?.freiAbZeit ?? new Date()) {
+  function urlaubskonflikt(fahrzeug, zielOrt, endeZeit, startZeit = fahrzeug.status?.freiAbZeit ?? new Date(), bewertung = null) {
     const urlaube = (fahrzeug.urlaub ?? []).filter(u => u.bis > new Date());
     if (!urlaube.length || !endeZeit) return null;
-    const daheim = new Date(endeZeit.getTime() + heimfahrtStunden(fahrzeug, zielOrt) * 3600 * 1000);
+    const rest = (bewertung?.fahrerRestLenkEnde != null && bewertung?.fahrerRestSchichtEnde != null)
+      ? { restLenkzeitStunden: bewertung.fahrerRestLenkEnde, restSchichtzeitStunden: bewertung.fahrerRestSchichtEnde } : null;
+    const daheim = new Date(endeZeit.getTime() + heimfahrtStunden(fahrzeug, zielOrt, rest) * 3600 * 1000);
     const u = urlaube.find(x => startZeit < x.bis && daheim > x.von);
     return u ? `Urlaub ${u.fahrer} ${u.von.toLocaleDateString('de-DE')}-${u.bis.toLocaleDateString('de-DE')} (${u.status}) - Tour samt Heimfahrt wäre erst ${daheim.toLocaleString('de-DE')} zu Ende` : null;
   }
 
-  /** Dauer einer Leerfahrt von `ort` zum Firmensitz (Strecken-Schätzung, 20 % Zuschlag für Pausen). */
-  function heimfahrtStunden(fahrzeug, ort) {
+  /**
+   * Dauer einer Leerfahrt von `ort` zum Firmensitz MIT Pflicht- und Schichtpausen (Lenkzeit-Simulation, Start mit
+   * den übergebenen Rest-Zeiten, sonst ausgeruht) plus 1 h Sicherheit. Das Spiel fährt ein Fahrzeug nie von
+   * selbst heim: ohne gebuchten Rückruf bleibt es am Zielort stehen (siehe Urlaub: Fahrzeug muss um 00:00 des
+   * ersten Urlaubstags am Firmensitz sein).
+   */
+  function heimfahrtStunden(fahrzeug, ort, rest = null) {
     const heimat = parseFirmenstandort() || 'Berlin';
     const spez = holeFahrzeugSpezifikation(fahrzeug.verbrauchsTyp ?? fahrzeug.typ);
     const kmh = spez.geschwindigkeitKmh ?? ZEIT_ANNAHMEN.avgGeschwindigkeitKmh;
     const heimKm = ort && ort !== heimat ? geschaetzteStrassenKm(ort, heimat) : 0;
-    return heimKm == null ? 0 : (heimKm / kmh) * 1.2;
+    if (heimKm == null) return 0;
+    if (!(heimKm > 0)) return 0;
+    const fahrer = fahrzeug.live?.drivers?.length === 2 ? 2 : 1;
+    const sim = simuliereTourZeitplan([{ dauer: heimKm / kmh, istFahrt: true }], fahrer, rest?.restLenkzeitStunden ?? null, rest?.restSchichtzeitStunden ?? null);
+    return sim.gesamtStunden + 1;
   }
 
   /**
@@ -4005,7 +4016,7 @@
         });
         konsole.fortschritt(1);
         konsole.ende('Fertig');
-        log(`<strong>Fertig:</strong> ${erg.gebucht} von ${plan.length} Touren eingeplant · ${fmtEuro(erg.summe)}${erg.fehler ? ` · ${erg.fehler} fehlgeschlagen` : ''}`, erg.fehler ? 'fi-warn' : 'fi-good');
+        log(`<strong>Fertig:</strong> ${erg.gebucht} von ${plan.filter(p => p.art !== 'rueckruf').length} Touren eingeplant · ${fmtEuro(erg.summe)}${erg.rueckrufe ? ` · ${erg.rueckrufe} Rückruf${erg.rueckrufe > 1 ? 'e' : ''}` : ''}${erg.fehler ? ` · ${erg.fehler} fehlgeschlagen` : ''}`, erg.fehler ? 'fi-warn' : 'fi-good');
       } catch (e) {
         console.error('[FI-Helper] Plan buchen fehlgeschlagen', e);
         log(`Fehler: ${e.message}`, 'fi-bad');
@@ -4067,8 +4078,10 @@
         konsole.ende('Fertig');
         if (ergebnis.plan?.length) {
           befuellPlan = ergebnis.plan;
-          log(`<strong>${ergebnis.plan.length} Touren berechnet</strong> · ${fmtEuro(ergebnis.summeEuro)}`, 'fi-good');
-          logEl.insertAdjacentHTML('beforeend', `<div class="fi-dash-row" style="margin-top:8px;"><button type="button" class="fi-dash-btn fi-bestaetigen">✅ Touren bestätigen (${ergebnis.plan.length} · ${fmtEuro(ergebnis.summeEuro)})</button></div>`);
+          const nTouren = ergebnis.plan.filter(p => p.art !== 'rueckruf').length;
+          const nRueck = ergebnis.plan.length - nTouren;
+          log(`<strong>${nTouren} Touren berechnet</strong> · ${fmtEuro(ergebnis.summeEuro)}${nRueck ? ` · ${nRueck} Rückruf${nRueck > 1 ? 'e' : ''}` : ''}`, 'fi-good');
+          logEl.insertAdjacentHTML('beforeend', `<div class="fi-dash-row" style="margin-top:8px;"><button type="button" class="fi-dash-btn fi-bestaetigen">✅ Touren bestätigen (${nTouren}${nRueck ? ` + ${nRueck} 🏠↩` : ''} · ${fmtEuro(ergebnis.summeEuro)})</button></div>`);
         } else {
           log('Nichts einplanbar.', 'fi-muted');
         }
@@ -4647,6 +4660,32 @@
       }
     }
 
+    // Urlaub: Das Spiel fährt kein Fahrzeug von selbst heim, am Urlaubsbeginn muss es aber am Firmensitz stehen.
+    // Passt vor dem nächsten Urlaub (<= 5 Tage) keine weitere Tour mehr (weniger als 24 h Luft nach Heimfahrt), wird
+    // ein Rückruf mit in den Plan genommen (hängt eine Leertour zum Firmensitz an das Planende).
+    if (trocken && simulierteFlotte && !abgebrochen()) {
+      const heimat = parseFirmenstandort() || 'Berlin';
+      const jetztMs = Date.now();
+      simulierteFlotte.forEach(f => {
+        const id = String(f.status.vehicleId);
+        if (nurKategorie && f.typ !== nurKategorie) return;
+        if (gesperrteFahrzeuge.has(id) || urlaubLaeuftJetzt(f.urlaub)) return;
+        const ort = f.status.freiAbOrt;
+        const frei = f.status.freiAbZeit;
+        if (!ort || ort === heimat || !frei) return;
+        const u = (f.urlaub ?? [])
+          .filter(x => x.von.getTime() > jetztMs && x.von.getTime() - jetztMs <= 5 * 24 * 3600 * 1000 && x.von > frei)
+          .sort((a, b) => a.von - b.von)[0];
+        if (!u) return;
+        const daheimMs = frei.getTime() + heimfahrtStunden(f, ort, f.status.fahrerRestOverride) * 3600 * 1000;
+        if (u.von.getTime() - daheimMs >= 24 * 3600 * 1000) return; // noch Platz für eine weitere Tour
+        const kurzName = f.name.split(' · ')[0];
+        const beschreibung = `${kurzName}: 🏠↩ Rückruf nach ${heimat} · Urlaub ${u.fahrer.split(' ')[0]} ab ${u.von.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })}`;
+        log(`▸ ${beschreibung}`, 'fi-good');
+        plan.push({ art: 'rueckruf', vehicleId: f.status.vehicleId, fahrzeugName: f.name, beschreibung, verguetung: 0 });
+      });
+    }
+
     return { anzahlAngenommen, summeEuro, plan };
   }
 
@@ -4657,7 +4696,7 @@
    * restlichen Touren dieses Fahrzeugs übersprungen, alle anderen Fahrzeuge laufen weiter.
    */
   async function fuehreBefuellPlanAus({ plan, log, fortschritt, abgebrochen }) {
-    let gebucht = 0, fehler = 0, summe = 0;
+    let gebucht = 0, fehler = 0, summe = 0, rueckrufe = 0;
     const gesperrt = new Map(); // vehicleId -> Grund ('urlaub' = stillschweigend überspringen)
     const echtesFreiAb = new Map();
     for (let i = 0; i < plan.length; i++) {
@@ -4666,7 +4705,18 @@
       const kurz = z.fahrzeugName.split(' · ')[0];
       fortschritt({ schritt: i + 1, gesamt: plan.length, text: `Buche ${kurz}` });
       if (gesperrt.has(String(z.vehicleId))) {
-        if (gesperrt.get(String(z.vehicleId)) !== 'urlaub') log(`⏭ ${kurz}: übersprungen (vorherige Buchung dieses Fahrzeugs scheiterte)`, 'fi-muted');
+        if (gesperrt.get(String(z.vehicleId)) !== 'urlaub' && z.art !== 'rueckruf') log(`⏭ ${kurz}: übersprungen (vorherige Buchung dieses Fahrzeugs scheiterte)`, 'fi-muted');
+        continue;
+      }
+      if (z.art === 'rueckruf') { // steht im Plan immer hinter den Touren des Fahrzeugs
+        try {
+          await rufeFahrzeugZurueck(z.vehicleId);
+          rueckrufe++;
+          log(`✅ ${z.beschreibung}`, 'fi-good');
+        } catch (e) {
+          fehler++;
+          log(`❌ ${z.beschreibung.split(' · ')[0]} fehlgeschlagen: ${e.message}`, 'fi-bad');
+        }
         continue;
       }
       const freiAb = echtesFreiAb.get(String(z.vehicleId)) ?? new Date(z.freiAbMs);
@@ -4695,7 +4745,7 @@
         console.error('[FI-Helper] Plan-Buchung fehlgeschlagen', z, e);
       }
     }
-    return { gebucht, fehler, summe };
+    return { gebucht, fehler, summe, rueckrufe };
   }
 
   /**
