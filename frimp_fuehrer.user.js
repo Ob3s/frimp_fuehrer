@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.32.4
+// @version      0.32.5
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.32.4';
+  const SCRIPT_VERSION = '0.32.5';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2476,6 +2476,7 @@
       .fi-scan-chip.rechnet { color: #ffd98a; border-color: #f5b84b; animation: fi-puls .7s ease-in-out infinite alternate; }
       .fi-scan-chip.fertig { color: #8ef2a8; border-color: rgba(142,242,168,.55); background: rgba(20,60,30,.30); }
       .fi-scan-chip.leer { color: #6f7b90; opacity: .6; }
+      .fi-scan-chip.weg, .fi-scan-feed > div.weg { opacity: 0; transition: opacity .6s ease-out; }
       @keyframes fi-puls { from { opacity: .5; } to { opacity: 1; } }
       .fi-scan-feed { margin-top: 6px; font: 600 11.5px ui-monospace, Consolas, monospace; color: #dbe2f0; display: flex; flex-direction: column; gap: 1px; }
       .fi-scan-feed > div { animation: fi-einflug .3s ease-out backwards; }
@@ -4422,6 +4423,8 @@
       zeile.textContent = text;
       feed.appendChild(zeile);
       while (feed.children.length > 4) feed.removeChild(feed.firstChild);
+      // Fertige Meldungen blenden sich nach wenigen Sekunden aus
+      setTimeout(() => { zeile.classList.add('weg'); setTimeout(() => zeile.remove(), 650); }, 5000);
     };
     const setzeWert = (k, html) => {
       let el = werte.get(k);
@@ -4469,6 +4472,11 @@
         if (!c) return;
         c.className = `fi-scan-chip ${zustand}`;
         c.textContent = text ? `${name} · ${text}` : name;
+        clearTimeout(c._weg);
+        // Fertige Fahrzeuge verschwinden nach ein paar Sekunden - so bleibt Platz für das, was noch läuft
+        if (zustand === 'fertig' || zustand === 'leer') {
+          c._weg = setTimeout(() => { c.classList.add('weg'); setTimeout(() => c.remove(), 650); }, 3000);
+        }
       },
       wert: setzeWert,
       ende: text => { if (text) q('.fi-scan-stufe').textContent = text; wurzel.classList.add('fi-scan-fertig'); cancelAnimationFrame(tween); },
