@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.32.5
+// @version      0.33.0
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.32.5';
+  const SCRIPT_VERSION = '0.33.0';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -65,6 +65,7 @@
     frachtPreisProKm: 'td:nth-child(7) .pricekm',
     frachtStrafe: 'td:nth-child(8) .penalty',
     frachtFrist: 'td:nth-child(9) .badge-deadline',     // "Lieferfrist: DD.MM.YYYY HH:MM"
+    frachtAdrPlakette: '.fi-adr-plaque',                // ADR-Plakette in td:nth-child(3) (nur bei Gefahrgutfracht)
     frachtJobIdInput: 'form input[name="job_id"]',
     frachtStellplaetzeBenoetigt: 'td:nth-child(5) .badge', // z.B. "16 Stellplätze" - Kapazitäts-Spalte
     // Filter-Formular (für spätere automatische Filter-Navigation, z.B. body_type=van)
@@ -82,6 +83,7 @@
 
     // --- Seite: /game/staff.php (Personal) ---
     staffRolle: '.role', // Text z.B. "Fahrer" / "Disponent" / "Mechaniker" - eine je Personal-Kachel
+    staffQualifikation: '.fi-person-qualifications .mini-badge', // z.B. "Klasse CE", "ADR" (nur bei Fahrern)
 
     // --- Seite: Fuhrpark-Übersicht (fuhrpark.php) ---
     fuhrparkCard: '.fleet-card',                      // ein Artikel pro Fahrzeug, data-vehicle-id
@@ -622,6 +624,7 @@
         strafeEuro,
         lieferfrist: fristMatch ? parseDeDateTime(fristMatch[1]) : null,
         stellplaetzeBenoetigt,
+        adr: !!row.querySelector(SELECTORS.frachtAdrPlakette), // Gefahrgut: ADR-Berechtigung ALLER eingesetzten Fahrer nötig
       });
     });
 
@@ -1443,8 +1446,11 @@
 
       // Nur Komplettladungen sind automatisch buchbar (Teilladungen irrelevant) - spart bei
       // vollem Markt-Scan (alle Seiten) den Großteil der Rechenzeit.
+      // ADR-Aufträge nur für Fahrzeuge, deren Fahrer ALLE ADR haben. Haben sie es, gewinnen ADR-Aufträge von selbst
+      // (zahlen meist ~doppelt so viel €/km wie die normale Variante derselben Kategorie).
+      const darfAdr = !!fahrzeug.adrFaehig;
       const einzelBewertungen = angeboteFuerDirekt
-        .filter(a => a.kapazitaet === 'Komplettladung' && a.jobId)
+        .filter(a => a.kapazitaet === 'Komplettladung' && a.jobId && (darfAdr || !a.adr))
         .map(fracht => {
           const bewertung = bewerteFrachtFuerFahrzeug(fracht, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (bewertung && direktKm) {
@@ -1464,7 +1470,7 @@
       const kettenZiel = !ketten ? null : (zielReferenzStadt || (fahrzeug.heimkehr ? (parseFirmenstandort() || 'Berlin') : null));
       const kettenRadius = zielReferenzStadt ? zielRadiusKm : 30;
       const kettenBewertungen = kettenZiel
-        ? baueKettenKandidaten(angebote.filter(a => a.kapazitaet === 'Komplettladung' && a.jobId), kettenZiel, kettenRadius)
+        ? baueKettenKandidaten(angebote.filter(a => a.kapazitaet === 'Komplettladung' && a.jobId && (darfAdr || !a.adr)), kettenZiel, kettenRadius)
             .map(kette => {
               const bewertung = bewerteKetteFuerFahrzeug(kette, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
               if (bewertung && direktKm) {
@@ -2940,6 +2946,15 @@
   }
 
   /**
+   * ADR-Stand je Fahrzeug (Schlüssel = Fahrzeugname wie in der Flotte), gefüllt von fetchUrlaubsSperren (gleicher
+   * staff.php-Abruf). Gefahrgut-Aufträge sind nur erlaubt, wenn ALLE eingesetzten Fahrer ADR haben.
+   * Unbekannt (Fahrzeug nicht in der Liste) gilt als "kein ADR".
+   * @type {Map<string, {fahrer: number, adr: number}>}
+   */
+  const adrStatusNachFahrzeug = new Map();
+  const fahrzeugHatAdr = name => { const s = adrStatusNachFahrzeug.get(name); return !!s && s.fahrer > 0 && s.adr === s.fahrer; };
+
+  /**
    * Urlaub der Fahrer (staff.php): pro Fahrer-Karte steht z.B.
    * "Urlaubsantrag offen · 27.10.–29.10.2026" (genehmigte Urlaube vermutlich
    * "Urlaub genehmigt · ..." - Text noch nicht beobachtet, deshalb allgemein
@@ -2956,8 +2971,16 @@
     try {
       const res = await fiFetch('/game/staff.php', { credentials: 'same-origin', cache: 'no-store' });
       const doc = safeParseHtml(await res.text());
+      const adrNeu = new Map(); // Fahrzeugname -> {fahrer, adr}: Wie viele Fahrer sind eingesetzt, wie viele davon mit ADR?
       doc.querySelectorAll('article').forEach(card => {
         const t = card.innerText.replace(/\s+/g, ' ').trim();
+        const fzAdr = /Fahrzeug\s+(.+?)\s+eingesetzt/.exec(t);
+        if (fzAdr && /^.+?\s+Fahrer\b/.test(t)) {
+          const eintrag = adrNeu.get(fzAdr[1].trim()) ?? { fahrer: 0, adr: 0 };
+          eintrag.fahrer++;
+          if (Array.from(card.querySelectorAll(SELECTORS.staffQualifikation)).some(b => b.textContent.trim() === 'ADR')) eintrag.adr++;
+          adrNeu.set(fzAdr[1].trim(), eintrag);
+        }
         const m = /Urlaub(?:santrag)?(?:\s+([A-Za-zäöüß]+))?\s*·\s*(\d{2})\.(\d{2})\.\s*[–-]\s*(\d{2})\.(\d{2})\.(\d{4})/.exec(t);
         const fz = /Fahrzeug\s+(.+?)\s+eingesetzt/.exec(t);
         if (!m || !fz) return;
@@ -2971,6 +2994,7 @@
         liste.push({ fahrer, von, bis, status: m[1] ?? 'läuft' }); // laufender Urlaub steht als "Im Urlaub · ..." (ohne Statuswort)
         sperren.set(fz[1].trim(), liste);
       });
+      if (adrNeu.size) { adrStatusNachFahrzeug.clear(); adrNeu.forEach((v, k) => adrStatusNachFahrzeug.set(k, v)); }
     } catch (e) {
       console.warn('[FI-Helper] Urlaubsdaten konnten nicht geladen werden', e);
     }
@@ -3179,8 +3203,9 @@
   }
 
   // Fahrzeuge, die nicht mehr beplant werden (z. B. vor dem Verkauf): keine Frachtangebote, kein Befüllen,
-  // kein Planungsbedarf-Marker. Laufende Touren bleiben im Tourenplan sichtbar.
-  const VON_PLANUNG_AUSGESCHLOSSEN = ['PL 01'];
+  // kein Planungsbedarf-Marker. Laufende Touren bleiben im Tourenplan sichtbar. Aktuell leer (PL 01 seit
+  // 2026-11-09 mit ADR-Fahrern wieder voll im Einsatz).
+  const VON_PLANUNG_AUSGESCHLOSSEN = [];
   const istVonPlanungAusgeschlossen = f => VON_PLANUNG_AUSGESCHLOSSEN.includes(String(f.name).split(' · ')[0].trim());
 
   function baueFleetMitTyp(fleetMitLive, detailsMap, fallbackLabel, urlaubNachFahrzeug = new Map()) {
@@ -3194,6 +3219,7 @@
         heimkehrGrund: heim.grund,
         typ,
         urlaub: urlaubNachFahrzeug.get(f.name) ?? [],
+        adrFaehig: fahrzeugHatAdr(f.name), // alle eingesetzten Fahrer haben ADR -> Gefahrgut-Aufträge erlaubt
         verbrauchsTyp: normalisiereFahrzeugtyp(details?.typ) || typ,
         stellplaetze: details?.stellplaetze ?? holeFahrzeugSpezifikation(details?.frachtKategorie || details?.typ || fallbackLabel).stellplaetzeGesamt ?? null,
       };
@@ -3233,7 +3259,7 @@
    */
   const marktScanCache = new Map();
   const MARKT_CACHE_TTL_MS = 10 * 60 * 1000; // 10 Minuten, danach gilt der Cache als abgelaufen
-  const MARKT_CACHE_STORAGE_PREFIX = 'fi_markt_cache_v1_';
+  const MARKT_CACHE_STORAGE_PREFIX = 'fi_markt_cache_v2_'; // v2: Angebote tragen das ADR-Kennzeichen (alte Einträge ohne gelten nicht mehr)
 
   /**
    * Der Scan-Cache überlebt jetzt auch Seitenwechsel (die reine Map im
