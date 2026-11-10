@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.33.1
+// @version      0.33.2
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.33.1';
+  const SCRIPT_VERSION = '0.33.2';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -455,7 +455,7 @@
    * Verhalten schlechter als vorher, nur potenziell kein Fetch gespart.
    * @returns {Promise<{name: string, status: VehicleStatus|null}[]>}
    */
-  async function fetchFleetStatus(onListe = null, onFahrzeug = null) {
+  async function fetchFleetStatus(onListe = null, onFahrzeug = null, filterListe = null) {
     const onDispatchPage = /\/game\/dispatch\.php/.test(location.pathname);
     let vehicles;
     let vorabStatus = null;
@@ -481,6 +481,8 @@
       }
     }
 
+    // Optional: nur die Fahrzeuge laden, die der Aufrufer braucht (z. B. nur eine Fahrzeugkategorie)
+    if (filterListe && vehicles.length) vehicles = await filterListe(vehicles);
     if (!vehicles.length) return [];
     onListe?.(vehicles.map(v => v.name));
 
@@ -3870,7 +3872,7 @@
         // Flotte + Urlaube VOR der Frachtbörse: Fahrzeuge, die wegen Urlaub gar nicht planbar sind, stehen
         // damit schon fest. Bleibt kein planbares Fahrzeug übrig, wird die Frachtbörse nicht gescannt.
         const kategorieLabel = options.find(o => o.value === bodyType)?.label ?? bodyType;
-        const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, erzwingeNeuladen);
+        const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, erzwingeNeuladen, kategorieLabel);
         const fleet = baueFleetMitTyp(fleetMitLive, detailsMap, kategorieLabel, await fetchUrlaubsSperren()).filter(f => !istVonPlanungAusgeschlossen(f));
         const urlaubsFahrzeuge = fleet.filter(f => f.typ === kategorieLabel && urlaubBlockiert(f));
         const kompatibleFleetVollstaendig = fleet.filter(f => f.typ === kategorieLabel && !urlaubsFahrzeuge.includes(f));
@@ -4150,12 +4152,24 @@
   }
 
   /** Flotte laden und dabei live in der Konsole zeigen, was eintrifft (Pläne, Fahrerzeiten, Fuhrpark). */
-  async function ladeFlotteMitLive(konsole, erzwingeNeuladen) {
+  async function ladeFlotteMitLive(konsole, erzwingeNeuladen, nurTyp = null) {
     const kurz = n => n.split(' · ')[0];
     konsole?.stufe('Fahrzeugpläne laden …');
+    // Mit nurTyp (Kategorie-Label, z. B. "Getreidekipper") werden Pläne und Fahrerzeiten NUR für Fahrzeuge dieser Kategorie
+    // abgerufen - die Kategorie steht im Fuhrpark (eine Seite), der parallel zur Fahrzeugliste geladen wird.
+    const detailsPromise = fetchFuhrparkDetails(erzwingeNeuladen);
+    const filterListe = nurTyp ? async fahrzeuge => {
+      const details = await detailsPromise;
+      return fahrzeuge.filter(v => {
+        const d = details.get(String(v.id));
+        const typ = d ? normalisiereFahrzeugtyp(d.frachtKategorie || d.typ) : null;
+        return !typ || typ === nurTyp; // Typ unbekannt: lieber laden als übersehen
+      });
+    } : null;
     const fleetRoh = await fetchFleetStatus(
       namen => konsole?.fahrzeuge(namen.map(kurz)),
       name => { konsole?.fahrzeugStatus(kurz(name), 'rechnet', 'Plan ✓'); konsole?.fund(`📡 ${kurz(name)} · Plan geladen`); },
+      filterListe,
     );
     konsole?.stufe('Fahrerzeiten & Fuhrpark laden …');
     const [fleetMitLive, detailsMap] = await Promise.all([
@@ -4164,7 +4178,7 @@
         konsole?.fahrzeugStatus(kurz(f.name), 'fertig', live ? 'Fahrerzeit ✓' : 'Plan ✓');
         return { ...f, live };
       })),
-      fetchFuhrparkDetails(erzwingeNeuladen),
+      detailsPromise,
     ]);
     return { fleetMitLive, detailsMap };
   }
@@ -4590,7 +4604,7 @@
       if (trocken && simulierteFlotte) {
         fleet = simulierteFlotte;
       } else {
-        const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, false); // Speicher nutzen: gleiche Daten wie die Frachtart-Berechnung
+        const { fleetMitLive, detailsMap } = await ladeFlotteMitLive(konsole, false, nurKategorie); // Speicher nutzen: gleiche Daten wie die Frachtart-Berechnung
         fleet = baueFleetMitTyp(fleetMitLive, detailsMap, null, await fetchUrlaubsSperren())
           .filter(f => f.typ && f.status?.vehicleId && f.status?.freiAbOrt && f.status?.freiAbZeit && !istVonPlanungAusgeschlossen(f));
         if (trocken) simulierteFlotte = fleet;
