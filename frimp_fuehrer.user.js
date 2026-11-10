@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.33.0
+// @version      0.33.1
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.33.0';
+  const SCRIPT_VERSION = '0.33.1';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -637,7 +637,9 @@
    * am zuverlässigsten ist es, direkt mit ?body_type=van zu filtern (siehe Filter-Formular).
    */
   function filtereNachAufbau(angebote, aufbauTyp) {
-    return angebote.filter(a => a.aufbauTyp.toLowerCase().includes(aufbauTyp.toLowerCase()));
+    // ADR-Angebote heißen in der Aufbau-Zeile anders ("ADR-Stückgut Plane", "ADR-Stückgut Kühlfracht") - sie kommen
+    // aber aus der body_type-Abfrage der Kategorie und gehören immer dazu.
+    return angebote.filter(a => a.adr || a.aufbauTyp.toLowerCase().includes(aufbauTyp.toLowerCase()));
   }
 
   /**
