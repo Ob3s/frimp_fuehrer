@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.33.2
+// @version      0.33.3
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.33.2';
+  const SCRIPT_VERSION = '0.33.3';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -4661,7 +4661,13 @@
           zuweisungen.push({ label, eintrag, kandidat: k });
           bekommenTour.add(String(eintrag.vehicleId));
         });
-        kompatibleFleet.forEach(f => { if (!bekommenTour.has(String(f.status.vehicleId))) ohneTour.add(String(f.status.vehicleId)); });
+        // Nur dauerhaft ausschließen, wenn das Fahrzeug WIRKLICH nichts Buchbares hat. Wer buchbare Kandidaten hatte, aber alle an
+        // andere Fahrzeuge verlor (Konflikt-Zuteilung, nur die Top 8 je Fahrzeug), wird in der nächsten Runde mit kleinerem Pool neu gefragt.
+        const verdraengtOhneTour = new Set(beste.filter(e => !e.beste && e.hatSchaffbareOption).map(e => String(e.vehicleId)));
+        kompatibleFleet.forEach(f => {
+          const id = String(f.status.vehicleId);
+          if (!bekommenTour.has(id) && !verdraengtOhneTour.has(id)) ohneTour.add(id);
+        });
       }
 
       melde('Berechnen');
