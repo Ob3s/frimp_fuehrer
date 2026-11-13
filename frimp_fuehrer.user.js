@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.34.1
+// @version      0.35.0
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.34.1';
+  const SCRIPT_VERSION = '0.35.0';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2540,9 +2540,15 @@
       .fi-einnahmen > summary::after { content: '▾'; float: right; opacity: .7; }
       .fi-einnahmen[open] > summary::after { content: '▴'; }
       .fi-ein-body { max-height: 340px; overflow: auto; margin-top: 4px; padding: 4px 8px 8px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; font: 600 12px ui-monospace, Consolas, monospace; color: #cbd5e1; }
-      .fi-ein-tag { display: flex; gap: 10px; align-items: baseline; padding: 7px 0 3px; margin-top: 4px; border-top: 1px solid rgba(255,255,255,.08); color: #ffd98a; }
-      .fi-ein-tag:first-child { border-top: 0; margin-top: 0; }
-      .fi-ein-tag b { color: #8ef2a8; }
+      .fi-ein-tagbox { border-top: 1px solid rgba(255,255,255,.08); }
+      .fi-ein-tagbox > summary { display: flex; gap: 10px; align-items: baseline; padding: 7px 0 5px; cursor: pointer; list-style: none; color: #ffd98a; }
+      .fi-ein-tagbox > summary::-webkit-details-marker { display: none; }
+      .fi-ein-tagbox > summary::before { content: '▸'; color: #9aa5b8; width: 10px; }
+      .fi-ein-tagbox[open] > summary::before { content: '▾'; }
+      .fi-ein-tagbox > summary b { color: #8ef2a8; }
+      .fi-ein-tagbox > summary b.neg, .fi-ein-betrag.neg, .fi-ein-stand.neg { color: #ffb3b3; }
+      .fi-ein-teile { margin-left: auto; color: #9aa5b8; font-weight: 600; }
+      .fi-ein-tagbox .fi-ein-zeile:last-of-type { margin-bottom: 6px; }
       .fi-ein-start { padding: 3px 0 2px; color: #9aa5b8; }
       .fi-ein-start b { color: #e8edf7; }
       .fi-ein-zeile { display: grid; grid-template-columns: 44px 48px 1fr auto 104px; gap: 8px; padding: 1px 0; }
@@ -3065,6 +3071,29 @@
   }
 
   /**
+   * Nächste Gehaltsabrechnung: monatlich am Tag der letzten Buchung (beobachtet: 28. um 00:01), nächster Termin = Folgemonat.
+   * Betrag genauer als die Monatssumme der Bank: Neueinstellungen im Abrechnungsmonat werden anteilig abgerechnet.
+   * @param {Object} z Ergebnis von fetchZahlungsplan
+   * @returns {Promise<{art: string, datum: Date, betrag: number, tag: number, std: number[], prognose: Object|null}|null>}
+   */
+  async function berechneNaechstesGehalt(z) {
+    if (z?.gehalt == null) return null;
+    const jetzt = Date.now();
+    const basis = z.letztesGehalt?.datum ?? null;
+    const tag = basis ? basis.getDate() : 28;
+    const std = basis ? [basis.getHours(), basis.getMinutes()] : [0, 1];
+    let kand = new Date(new Date().getFullYear(), new Date().getMonth(), tag, std[0], std[1]);
+    if (kand.getTime() <= jetzt) kand = new Date(kand.getFullYear(), kand.getMonth() + 1, tag, std[0], std[1]);
+    const gehalt = { art: 'gehalt', datum: kand, betrag: z.gehalt, tag, std, prognose: null };
+    const personal = await fetchPersonalGehaltsdaten();
+    if (personal.length) {
+      gehalt.prognose = prognostiziereGehaltsabrechnung(personal, kand);
+      gehalt.betrag = gehalt.prognose.summe;
+    }
+    return gehalt;
+  }
+
+  /**
    * Gehalt und Einstellungsdatum jedes Mitarbeiters (staff.php, gleicher Abruf wie die Urlaube -
    * der Zwischenspeicher liefert ihn ohne neue Anfrage).
    * @returns {Promise<{gehalt: number, seit: Date}[]>}
@@ -3478,22 +3507,7 @@
       const eur = x => `${Math.round(x).toLocaleString('de-DE')} €`;
       const tip = t => t.replace(/"/g, '&quot;');
 
-      // Gehalt: monatlich am Tag der letzten Buchung (beobachtet: 28. um 00:01), nächster Termin = Folgemonat
-      let gehalt = null;
-      if (z.gehalt != null) {
-        const basis = z.letztesGehalt?.datum ?? null;
-        const tag = basis ? basis.getDate() : 28;
-        const std = basis ? [basis.getHours(), basis.getMinutes()] : [0, 1];
-        let kand = new Date(new Date().getFullYear(), new Date().getMonth(), tag, std[0], std[1]);
-        if (kand.getTime() <= jetzt) kand = new Date(kand.getFullYear(), kand.getMonth() + 1, tag, std[0], std[1]);
-        gehalt = { art: 'gehalt', datum: kand, betrag: z.gehalt, tag, std, prognose: null };
-        // Genauer als die Monatssumme der Bank: Neueinstellungen im Abrechnungsmonat werden anteilig abgerechnet
-        const personal = await fetchPersonalGehaltsdaten();
-        if (personal.length) {
-          gehalt.prognose = prognostiziereGehaltsabrechnung(personal, kand);
-          gehalt.betrag = gehalt.prognose.summe;
-        }
-      }
+      const gehalt = await berechneNaechstesGehalt(z);
 
       // Alle anstehenden Zahlungen chronologisch durchrechnen
       const zahlungen = [
@@ -3649,7 +3663,7 @@
 
       // Erwartete Einnahmen: Tageswerte (netto) werden im Tourenplan über dem Datum angezeigt
       const einnahmen = berechneErwarteteEinnahmen(fleet, tourRatenMap);
-      aktualisiereEinnahmenDropdown(einnahmen);
+      aktualisiereEinnahmenDropdown(einnahmen).catch(e => console.warn('[FI-Helper] Einnahmen-Dropdown', e));
       if (pruef?.length) {
         const jetztMs = Date.now();
         const maxKmTag = kmProTag && kmProTag.size ? Math.max(...kmProTag.values()) : 1200;
@@ -4189,16 +4203,18 @@
         return !typ || typ === nurTyp; // Typ unbekannt: lieber laden als übersehen
       });
     } : null;
+    // Fortschritt als laufende Meldungen im Feed (neu unten, alt rutscht nach oben) statt als Chip je Fahrzeug
     const fleetRoh = await fetchFleetStatus(
-      namen => konsole?.fahrzeuge(namen.map(kurz)),
-      name => { konsole?.fahrzeugStatus(kurz(name), 'rechnet', 'Plan ✓'); konsole?.fund(`📡 ${kurz(name)} · Plan geladen`); },
+      null,
+      name => konsole?.fund(`📡 ${kurz(name)} · Plan geladen`),
       filterListe,
     );
     konsole?.stufe('Fahrerzeiten & Fuhrpark laden …');
+    let fahrerzeitenFertig = 0;
     const [fleetMitLive, detailsMap] = await Promise.all([
       Promise.all(fleetRoh.map(async f => {
         const live = f.status?.vehicleId ? await fetchLiveDriverStatus(f.status.vehicleId, f.name) : null;
-        konsole?.fahrzeugStatus(kurz(f.name), 'fertig', live ? 'Fahrerzeit ✓' : 'Plan ✓');
+        konsole?.fund(`⏱ ${kurz(f.name)} · ${live ? 'Fahrerzeit' : 'Plan'} geladen (${++fahrerzeitenFertig}/${fleetRoh.length})`);
         return { ...f, live };
       })),
       detailsPromise,
@@ -4421,16 +4437,17 @@
    * Tagessumme und bis dahin aufgelaufener Summe, darunter jede Gutschrift mit Uhrzeit, Fahrzeug und Route.
    * Der geöffnet/zu-Zustand bleibt bei jeder Aktualisierung erhalten (das <details> wird nicht neu gebaut).
    */
-  function aktualisiereEinnahmenDropdown(einnahmen) {
+  async function aktualisiereEinnahmenDropdown(einnahmen) {
     const el = document.getElementById('fi-dash-einnahmen');
     if (!el) return;
     const h = t => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
     const eur = x => `${Math.round(x).toLocaleString('de-DE')} €`;
+    const vz = x => `${x < 0 ? '−' : '+'}${eur(Math.abs(x))}`;
     const liste = [...(einnahmen?.liste ?? [])].sort((a, b) => a.ende - b.ende);
-    let det = el.querySelector('details');
+    let det = el.querySelector('details.fi-einnahmen');
     if (!det) {
       el.innerHTML = '<details class="fi-einnahmen"><summary></summary><div class="fi-ein-body"></div></details>';
-      det = el.querySelector('details');
+      det = el.querySelector('details.fi-einnahmen');
     }
     const summary = det.querySelector('summary');
     const body = det.querySelector('.fi-ein-body');
@@ -4440,28 +4457,50 @@
       return;
     }
     const letzte = liste[liste.length - 1].ende;
-    summary.textContent = `💶 Einnahmen · +${eur(einnahmen.netto)} netto aus ${liste.length} Tour${liste.length > 1 ? 'en' : ''} bis ${letzte.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' })}`;
-    const tage = new Map();
-    liste.forEach(t => {
-      const k = t.ende.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
-      const e = tage.get(k) ?? { netto: 0, brutto: 0, zeilen: [] };
-      e.netto += t.netto; e.brutto += t.brutto; e.zeilen.push(t);
-      tage.set(k, e);
-    });
-    // Kontostand jetzt (Anzeige oben auf der Seite); darauf werden die Einnahmen der Reihe nach aufaddiert
+
+    // Ereignisse: Gutschriften der eingeplanten Touren + Abbuchungen (Kreditraten, Gehalt) bis zur letzten Gutschrift
+    const ereignisse = liste.map(t => ({ zeit: t.ende, art: 'ein', fz: t.fahrzeug, text: `${t.von} → ${t.bis}`, betrag: t.netto }));
+    try {
+      const z = await fetchZahlungsplan();
+      if (z) {
+        (z.raten ?? []).filter(r => r.faellig.getTime() > Date.now() && r.faellig <= letzte)
+          .forEach(r => ereignisse.push({ zeit: r.faellig, art: 'rate', fz: '💳', text: `Kreditrate #${r.nr}`, betrag: -r.betrag }));
+        const gehalt = await berechneNaechstesGehalt(z);
+        if (gehalt && gehalt.datum <= letzte) ereignisse.push({ zeit: gehalt.datum, art: 'gehalt', fz: '👥', text: 'Gehaltsabrechnung', betrag: -gehalt.betrag });
+      }
+    } catch (e) {
+      console.warn('[FI-Helper] Zahlungsplan für das Einnahmen-Dropdown nicht verfügbar', e);
+    }
+    ereignisse.sort((a, b) => a.zeit - b.zeit);
+
+    // Kontostand jetzt (Anzeige oben auf der Seite); darauf werden Einnahmen und Abbuchungen der Reihe nach verrechnet
     const kontoText = document.querySelector(SELECTORS.kontostandValue)?.textContent;
     const konto = kontoText ? parseGermanNumber(kontoText) : null;
-    let lauf = 0;
-    let html = konto != null ? `<div class="fi-ein-start">Kontostand jetzt <b>${eur(konto)}</b></div>` : '';
-    tage.forEach((e, k) => {
-      html += `<div class="fi-ein-tag"><span>${h(k)}</span><b>+${eur(e.netto)}</b></div>`;
-      e.zeilen.forEach(t => {
-        lauf += t.netto;
-        const stand = konto != null ? konto + lauf : lauf;
-        html += `<div class="fi-ein-zeile"><span class="fi-ein-zeit">${t.ende.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</span><span class="fi-ein-fz">${h(t.fahrzeug)}</span><span class="fi-ein-route">${h(t.von)} → ${h(t.bis)}</span><span class="fi-ein-betrag">+${eur(t.netto)}</span><span class="fi-ein-stand">${konto != null ? '= ' : 'gesamt +'}${eur(stand)}</span></div>`;
-      });
+    let stand = konto ?? 0;
+    const tage = new Map();
+    ereignisse.forEach(e => {
+      stand += e.betrag;
+      e.stand = stand;
+      const k = e.zeit.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
+      const tag = tage.get(k) ?? { summe: 0, zeilen: [], touren: 0 };
+      tag.summe += e.betrag; tag.zeilen.push(e); if (e.art === 'ein') tag.touren++;
+      tage.set(k, tag);
     });
-    html += `<div class="fi-ein-fuss">Geschätzt: Strecke × Ø-€/km des Fahrzeugs, abzüglich Ø Diesel und Maut. Gutschrift zum Entladeende, nur bereits eingeplante Touren (brutto ${eur(einnahmen.brutto)}).</div>`;
+    summary.textContent = `💶 Einnahmen · +${eur(einnahmen.netto)} netto aus ${liste.length} Tour${liste.length > 1 ? 'en' : ''} bis ${letzte.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' })}${konto != null ? ` · Konto dann ${eur(stand)}` : ''}`;
+
+    // Geöffnete Tage merken, damit eine Aktualisierung nichts zuklappt
+    const offen = new Set([...body.querySelectorAll('details[open]')].map(d => d.dataset.tag));
+    let html = konto != null ? `<div class="fi-ein-start">Kontostand jetzt <b>${eur(konto)}</b></div>` : '';
+    tage.forEach((tag, k) => {
+      const ende = tag.zeilen[tag.zeilen.length - 1].stand;
+      const teile = [tag.touren ? `${tag.touren} Tour${tag.touren > 1 ? 'en' : ''}` : '', konto != null ? `Stand ${eur(ende)}` : ''].filter(Boolean).join(' · ');
+      html += `<details class="fi-ein-tagbox" data-tag="${h(k)}"${offen.has(k) ? ' open' : ''}><summary><span>${h(k)}</span><b class="${tag.summe < 0 ? 'neg' : ''}">${vz(tag.summe)}</b><span class="fi-ein-teile">${h(teile)}</span></summary>`;
+      tag.zeilen.forEach(e => {
+        html += `<div class="fi-ein-zeile"><span class="fi-ein-zeit">${e.zeit.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</span><span class="fi-ein-fz">${h(e.fz)}</span><span class="fi-ein-route">${h(e.text)}</span><span class="fi-ein-betrag${e.betrag < 0 ? ' neg' : ''}">${vz(e.betrag)}</span><span class="fi-ein-stand${e.stand < 0 ? ' neg' : ''}">${konto != null ? '= ' : 'gesamt '}${eur(e.stand)}</span></div>`;
+      });
+      html += '</details>';
+    });
+    html += `<div class="fi-ein-fuss">Einnahmen geschätzt: Strecke × Ø-€/km des Fahrzeugs, abzüglich Ø Diesel und Maut, Gutschrift zum Entladeende, nur bereits eingeplante Touren (brutto ${eur(einnahmen.brutto)}). Kreditraten und Gehalt zu ihren Fälligkeiten abgezogen; Käufe/Bauten nicht.</div>`;
     body.innerHTML = html;
   }
 
@@ -4535,14 +4574,35 @@
     const chips = new Map();
     let angeboteAngezeigt = 0;
     let tween = null;
-    const zeigeFund = text => {
+    const zeigeZeile = text => {
       const feed = q('.fi-scan-feed');
       const zeile = document.createElement('div');
       zeile.textContent = text;
-      feed.appendChild(zeile);
+      feed.appendChild(zeile); // Neues kommt unten dran, Altes rutscht nach oben und fällt nach 4 Zeilen raus
       while (feed.children.length > 4) feed.removeChild(feed.firstChild);
       // Fertige Meldungen blenden sich nach wenigen Sekunden aus
       setTimeout(() => { zeile.classList.add('weg'); setTimeout(() => zeile.remove(), 650); }, 5000);
+    };
+    // Meldungen laufen nacheinander ein statt auf einen Schlag (parallel geladene Fahrzeuge melden sich fast gleichzeitig):
+    // bei Rückstau etwas schneller, aber nie alle auf einmal.
+    const feedWarteschlange = [];
+    let feedTimer = null;
+    const zeigeFund = text => {
+      feedWarteschlange.push(text);
+      if (feedTimer) return;
+      const tick = () => {
+        const t = feedWarteschlange.shift();
+        if (t === undefined) { feedTimer = null; return; }
+        zeigeZeile(t);
+        feedTimer = setTimeout(tick, Math.max(25, Math.min(140, 2400 / (feedWarteschlange.length + 1))));
+      };
+      tick();
+    };
+    const feedLeeren = () => {
+      clearTimeout(feedTimer);
+      feedTimer = null;
+      feedWarteschlange.splice(0, Math.max(0, feedWarteschlange.length - 4));
+      while (feedWarteschlange.length) zeigeZeile(feedWarteschlange.shift());
     };
     const setzeWert = (k, html) => {
       let el = werte.get(k);
@@ -4597,7 +4657,7 @@
         }
       },
       wert: setzeWert,
-      ende: text => { if (text) q('.fi-scan-stufe').textContent = text; wurzel.classList.add('fi-scan-fertig'); cancelAnimationFrame(tween); },
+      ende: text => { if (text) q('.fi-scan-stufe').textContent = text; wurzel.classList.add('fi-scan-fertig'); cancelAnimationFrame(tween); feedLeeren(); },
     };
   }
 
