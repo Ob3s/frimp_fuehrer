@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.33.3
+// @version      0.34.0
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.33.3';
+  const SCRIPT_VERSION = '0.34.0';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2532,6 +2532,24 @@
       .fi-abrufe-liste { max-height: 260px; overflow: auto; font: 11px ui-monospace, Consolas, monospace; color: #7f8aa0; line-height: 1.5; border-top: 1px solid rgba(255,255,255,.08); padding-top: 4px; }
       .fi-abrufe-url { color: #9aa5b8; word-break: break-all; }
 
+      /* ====== Einnahmen-Dropdown (wann kommt wie viel Geld rein) ====== */
+      #fi-dash-einnahmen { margin: 8px 0 4px; }
+      .fi-einnahmen > summary { cursor: pointer; list-style: none; display: block; padding: 7px 11px; border-radius: 8px; border: 1px solid rgba(134,239,172,.30);
+        background: rgba(20,60,30,.20); color: #a9f7c4; font: 700 12.5px system-ui, sans-serif; }
+      .fi-einnahmen > summary::-webkit-details-marker { display: none; }
+      .fi-einnahmen > summary::after { content: '▾'; float: right; opacity: .7; }
+      .fi-einnahmen[open] > summary::after { content: '▴'; }
+      .fi-ein-body { max-height: 340px; overflow: auto; margin-top: 4px; padding: 4px 8px 8px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; font: 600 12px ui-monospace, Consolas, monospace; color: #cbd5e1; }
+      .fi-ein-tag { display: flex; gap: 10px; align-items: baseline; padding: 7px 0 3px; margin-top: 4px; border-top: 1px solid rgba(255,255,255,.08); color: #ffd98a; }
+      .fi-ein-tag:first-child { border-top: 0; margin-top: 0; }
+      .fi-ein-tag b { color: #8ef2a8; }
+      .fi-ein-lauf { margin-left: auto; color: #9aa5b8; font-weight: 600; }
+      .fi-ein-zeile { display: grid; grid-template-columns: 44px 48px 1fr auto; gap: 8px; padding: 1px 0; }
+      .fi-ein-zeit { color: #9aa5b8; }
+      .fi-ein-route { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9aa5b8; }
+      .fi-ein-betrag { color: #8ef2a8; text-align: right; }
+      .fi-ein-fuss { margin-top: 8px; font: 11px system-ui, sans-serif; color: #6f7b90; }
+
       /* ====== Einnahmen je Tag über der Datumsachse ====== */
       .fi-ein-seg { position: absolute; top: 0; height: 16px; box-sizing: border-box; padding: 0 2px; text-align: center; white-space: nowrap; overflow: hidden;
         border-left: 1px solid rgba(142,242,168,.35); font: 700 11px/16px ui-monospace, Consolas, monospace; color: #8ef2a8; container-type: inline-size; }
@@ -3372,6 +3390,8 @@
       </div>
       <div id="fi-dash-results" class="fi-dash-grid"></div>
 
+      <div id="fi-dash-einnahmen"></div>
+
       <h3>Tourenplan</h3>
       <div id="fi-dash-timeline"><div class="fi-empty">Lade Tourenplan …</div></div>
 
@@ -3627,6 +3647,7 @@
 
       // Erwartete Einnahmen: Tageswerte (netto) werden im Tourenplan über dem Datum angezeigt
       const einnahmen = berechneErwarteteEinnahmen(fleet, tourRatenMap);
+      aktualisiereEinnahmenDropdown(einnahmen);
       if (pruef?.length) {
         const jetztMs = Date.now();
         const maxKmTag = kmProTag && kmProTag.size ? Math.max(...kmProTag.values()) : 1200;
@@ -4353,7 +4374,8 @@
    * Zukunft schließt einen Auftrag ab; gutgeschrieben wird zum Entladeende. Route = letzte
    * "Fahrt beladen"-Phase desselben Auftrags davor; Vergütung = Strecke (Spiel-Formel) x Ø-€/Lastkm
    * des Fahrzeugs (7 Tage, sonst Flottenschnitt); netto = brutto x Ø-Quote nach Diesel und Maut.
-   * @returns {{tage: Map<string, {brutto: number, netto: number, touren: number, datum: Date}>, brutto: number, netto: number, touren: number}}
+   * @returns {{tage: Map<string, {brutto: number, netto: number, touren: number, datum: Date}>, brutto: number, netto: number, touren: number,
+   *            liste: {ende: Date, fahrzeug: string, von: string, bis: string, km: number, brutto: number, netto: number}[]}}
    */
   function berechneErwarteteEinnahmen(fleet, raten) {
     const gesamt = [...raten.values()].reduce((a, r) => ({ last: a.last + r.last, brutto: a.brutto + r.brutto, erg: a.erg + r.ergebnis, bm: a.bm + r.bruttoMitErgebnis }), { last: 0, brutto: 0, erg: 0, bm: 0 });
@@ -4361,6 +4383,7 @@
     const schnittQuote = gesamt.bm > 0 ? gesamt.erg / gesamt.bm : 0.9;
     const jetzt = Date.now();
     const tage = new Map();
+    const liste = []; // jede einzelne Gutschrift (für das Einnahmen-Dropdown)
     let brutto = 0, netto = 0, touren = 0;
     fleet.forEach(entry => {
       const kurz = entry.name.split(' · ')[0];
@@ -4384,9 +4407,56 @@
         tag.brutto += b; tag.netto += n; tag.touren++;
         tage.set(schluessel, tag);
         brutto += b; netto += n; touren++;
+        liste.push({ ende: p.ende, fahrzeug: kurz, von: route.von, bis: route.bis, km, brutto: b, netto: n });
       });
     });
-    return { tage, brutto, netto, touren };
+    return { tage, brutto, netto, touren, liste };
+  }
+
+  /**
+   * Dropdown "💶 Einnahmen": wann wie viel Geld durch die bereits eingeplanten Touren hereinkommt
+   * (Gutschrift zum Entladeende, Schätzung siehe berechneErwarteteEinnahmen). Je Tag eine Kopfzeile mit
+   * Tagessumme und bis dahin aufgelaufener Summe, darunter jede Gutschrift mit Uhrzeit, Fahrzeug und Route.
+   * Der geöffnet/zu-Zustand bleibt bei jeder Aktualisierung erhalten (das <details> wird nicht neu gebaut).
+   */
+  function aktualisiereEinnahmenDropdown(einnahmen) {
+    const el = document.getElementById('fi-dash-einnahmen');
+    if (!el) return;
+    const h = t => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+    const eur = x => `${Math.round(x).toLocaleString('de-DE')} €`;
+    const liste = [...(einnahmen?.liste ?? [])].sort((a, b) => a.ende - b.ende);
+    let det = el.querySelector('details');
+    if (!det) {
+      el.innerHTML = '<details class="fi-einnahmen"><summary></summary><div class="fi-ein-body"></div></details>';
+      det = el.querySelector('details');
+    }
+    const summary = det.querySelector('summary');
+    const body = det.querySelector('.fi-ein-body');
+    if (!liste.length) {
+      summary.textContent = '💶 Einnahmen · keine eingeplanten Touren';
+      body.innerHTML = '';
+      return;
+    }
+    const letzte = liste[liste.length - 1].ende;
+    summary.textContent = `💶 Einnahmen · +${eur(einnahmen.netto)} netto aus ${liste.length} Tour${liste.length > 1 ? 'en' : ''} bis ${letzte.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' })}`;
+    const tage = new Map();
+    liste.forEach(t => {
+      const k = t.ende.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
+      const e = tage.get(k) ?? { netto: 0, brutto: 0, zeilen: [] };
+      e.netto += t.netto; e.brutto += t.brutto; e.zeilen.push(t);
+      tage.set(k, e);
+    });
+    let lauf = 0;
+    let html = '';
+    tage.forEach((e, k) => {
+      lauf += e.netto;
+      html += `<div class="fi-ein-tag"><span>${h(k)}</span><b>+${eur(e.netto)}</b><span class="fi-ein-lauf">gesamt +${eur(lauf)}</span></div>`;
+      e.zeilen.forEach(t => {
+        html += `<div class="fi-ein-zeile"><span class="fi-ein-zeit">${t.ende.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</span><span class="fi-ein-fz">${h(t.fahrzeug)}</span><span class="fi-ein-route">${h(t.von)} → ${h(t.bis)}</span><span class="fi-ein-betrag">+${eur(t.netto)}</span></div>`;
+      });
+    });
+    html += `<div class="fi-ein-fuss">Geschätzt: Strecke × Ø-€/km des Fahrzeugs, abzüglich Ø Diesel und Maut. Gutschrift zum Entladeende, nur bereits eingeplante Touren (brutto ${eur(einnahmen.brutto)}).</div>`;
+    body.innerHTML = html;
   }
 
   /**
