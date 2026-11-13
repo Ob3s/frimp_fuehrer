@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.35.3
+// @version      0.35.4
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.35.3';
+  const SCRIPT_VERSION = '0.35.4';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2560,16 +2560,9 @@
       @keyframes fi-ruettel { from { transform: translateY(0); } to { transform: translateY(-1.5px); } }
       .fi-scan-werte { display: flex; flex-wrap: wrap; gap: 2px 16px; font: 600 12px ui-monospace, Consolas, monospace; color: #9aa5b8; }
       .fi-scan-werte b { color: #ffd98a; }
-      .fi-scan-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-      .fi-scan-chip { font: 700 10.5px ui-monospace, Consolas, monospace; padding: 2px 7px; border-radius: 5px; border: 1px solid rgba(255,255,255,.14); color: #6f7b90; }
-      .fi-scan-chip.rechnet { color: #ffd98a; border-color: #f5b84b; animation: fi-puls .7s ease-in-out infinite alternate; }
-      .fi-scan-chip.fertig { color: #8ef2a8; border-color: rgba(142,242,168,.55); background: rgba(20,60,30,.30); }
-      .fi-scan-chip.leer { color: #6f7b90; opacity: .6; }
-      .fi-scan-chip.weg, .fi-scan-feed > div.weg { opacity: 0; transition: opacity .6s ease-out; }
-      @keyframes fi-puls { from { opacity: .5; } to { opacity: 1; } }
-      .fi-scan-feed { margin-top: 6px; font: 600 11.5px ui-monospace, Consolas, monospace; color: #dbe2f0; display: flex; flex-direction: column; gap: 1px; }
-      .fi-scan-feed > div { animation: fi-einflug .3s ease-out backwards; }
-      .fi-scan-feed > div:nth-last-child(n+3) { opacity: .55; }
+      /* Feed: 4 Zeilen hoch, Spalten kommen dazu, soweit der Bildschirm sie hergibt (Anzahl steuert baueScanKonsole) */
+      .fi-scan-feed { margin-top: 6px; font: 600 11.5px ui-monospace, Consolas, monospace; color: #dbe2f0; display: grid; grid-auto-flow: column; grid-template-rows: repeat(4, auto); grid-auto-columns: minmax(240px, 1fr); gap: 1px 14px; }
+      .fi-scan-feed > div { animation: fi-einflug .3s ease-out backwards; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .fi-scan.fi-scan-fertig * { animation-play-state: paused !important; }
       @keyframes fi-einflug { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
       @keyframes fi-wachs { from { opacity: 0; transform: scaleX(0); } to { opacity: 1; transform: none; } }
@@ -4634,7 +4627,7 @@
 
   /**
    * Live-Konsole für Scan/Berechnung: Radar-Animation (reines CSS), Fortschrittsbalken,
-   * Zähler und je Fahrzeug ein Chip (wartet → rechnet → fertig mit €/km).
+   * Zähler und ein Feed (4 Zeilen, so viele Spalten wie der Bildschirm fasst) mit allem, was gerade eintrifft.
    * Alle Aufrufe sind billig (Text/Klassen); Animationen laufen auf der GPU.
    */
   function baueScanKonsole(container, titel) {
@@ -4642,24 +4635,25 @@
       <div class="fi-scan-head"><span class="fi-scan-titel"></span><span class="fi-scan-stufe"></span></div>
       <div class="fi-road"><i class="fi-road-fill"></i><i class="fi-road-dashes"></i><span class="fi-road-start">🏢</span><span class="fi-road-ziel">🏁</span><span class="fi-truck"><span>🚚</span></span></div>
       <div class="fi-scan-werte"></div>
-      <div class="fi-scan-chips"></div>
       <div class="fi-scan-feed"></div>
     </div>`;
     const wurzel = container.querySelector('.fi-scan');
     const q = sel => wurzel.querySelector(sel);
     q('.fi-scan-titel').textContent = titel;
     const werte = new Map();
-    const chips = new Map();
     let angeboteAngezeigt = 0;
     let tween = null;
+    // Feed: 4 Zeilen hoch; je breiter der Bildschirm, desto mehr Spalten (min. 240 px + 14 px Abstand je Spalte).
+    // Neues kommt unten dran (Spalte für Spalte), Altes rutscht nach oben und fällt als Erstes raus, wenn alles voll ist.
+    const FEED_ZEILEN = 4;
+    const feedKapazitaet = () => FEED_ZEILEN * Math.max(1, Math.floor(((q('.fi-scan-feed').clientWidth || 360) + 14) / 254));
     const zeigeZeile = text => {
       const feed = q('.fi-scan-feed');
       const zeile = document.createElement('div');
       zeile.textContent = text;
-      feed.appendChild(zeile); // Neues kommt unten dran, Altes rutscht nach oben und fällt nach 4 Zeilen raus
-      while (feed.children.length > 4) feed.removeChild(feed.firstChild);
-      // Fertige Meldungen blenden sich nach wenigen Sekunden aus
-      setTimeout(() => { zeile.classList.add('weg'); setTimeout(() => zeile.remove(), 650); }, 5000);
+      zeile.title = text;
+      feed.appendChild(zeile);
+      while (feed.children.length > feedKapazitaet()) feed.removeChild(feed.firstChild);
     };
     // Meldungen laufen nacheinander ein statt auf einen Schlag (parallel geladene Fahrzeuge melden sich fast gleichzeitig):
     // bei Rückstau etwas schneller, aber nie alle auf einmal.
@@ -4679,7 +4673,7 @@
     const feedLeeren = () => {
       clearTimeout(feedTimer);
       feedTimer = null;
-      feedWarteschlange.splice(0, Math.max(0, feedWarteschlange.length - 4));
+      feedWarteschlange.splice(0, Math.max(0, feedWarteschlange.length - feedKapazitaet()));
       while (feedWarteschlange.length) zeigeZeile(feedWarteschlange.shift());
     };
     const setzeWert = (k, html) => {
@@ -4712,28 +4706,6 @@
         };
         tween = requestAnimationFrame(schritt);
       },
-      fahrzeuge: namen => {
-        q('.fi-scan-chips').innerHTML = '';
-        chips.clear();
-        namen.forEach(n => {
-          const c = document.createElement('span');
-          c.className = 'fi-scan-chip';
-          c.textContent = n;
-          q('.fi-scan-chips').appendChild(c);
-          chips.set(n, c);
-        });
-      },
-      fahrzeugStatus: (name, zustand, text = '') => {
-        const c = chips.get(name);
-        if (!c) return;
-        c.className = `fi-scan-chip ${zustand}`;
-        c.textContent = text ? `${name} · ${text}` : name;
-        clearTimeout(c._weg);
-        // Fertige Fahrzeuge verschwinden nach ein paar Sekunden - so bleibt Platz für das, was noch läuft
-        if (zustand === 'fertig' || zustand === 'leer') {
-          c._weg = setTimeout(() => { c.classList.add('weg'); setTimeout(() => c.remove(), 650); }, 3000);
-        }
-      },
       wert: setzeWert,
       ende: text => { if (text) q('.fi-scan-stufe').textContent = text; wurzel.classList.add('fi-scan-fertig'); cancelAnimationFrame(tween); feedLeeren(); },
     };
@@ -4754,16 +4726,13 @@
   async function berechneBesteRouten(angebote, flotte, zielStadt, radius, konsole = null, { ketten = true, balken = true } = {}) {
     const kurz = f => f.name.split(' · ')[0];
     konsole?.stufe(`Berechne ${angebote.length.toLocaleString('de-DE')} Angebote × ${flotte.length} Fahrzeuge`);
-    konsole?.fahrzeuge(flotte.map(kurz));
     const ergebnis = [];
     for (let i = 0; i < flotte.length; i++) {
       const f = flotte[i];
-      konsole?.fahrzeugStatus(kurz(f), 'rechnet');
       await naechsterFrame();
       const [e] = findeBesteRoutenProFahrzeug(angebote, [f], zielStadt, radius, ketten);
       ergebnis.push(e);
       const km = e?.kandidatenRangliste?.[0]?.bewertung?.effektivProKm;
-      konsole?.fahrzeugStatus(kurz(f), km != null ? 'fertig' : 'leer', km != null ? `${km.toFixed(2).replace('.', ',')} €/km` : '–');
       const top = e?.kandidatenRangliste?.[0];
       konsole?.fund(top
         ? `🚚 ${kurz(f)} → ${top.fracht.startOrt} → ${top.fracht.zielOrt} · ${km.toFixed(2).replace('.', ',')} €/km`
