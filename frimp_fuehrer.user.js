@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.35.1
+// @version      0.35.2
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.35.1';
+  const SCRIPT_VERSION = '0.35.2';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -144,13 +144,38 @@
   let fiAbrufGespart = 0;
   function fiGetSpeicherLeeren() { fiGetSpeicher.clear(); }
 
+  /**
+   * Nach einem Schreibzugriff nur verwerfen, was er wirklich verändert: Weiß der Aufruf, für welches Fahrzeug er gilt
+   * (opts.fiFahrzeug oder vehicle_id im Body), fallen nur dessen Plan/Fahrerzeit sowie Markt, Bank und Posteingang aus dem
+   * Speicher - die Pläne der übrigen Fahrzeuge, Fuhrpark, Personal usw. bleiben und werden nicht erneut abgerufen.
+   * Ohne Fahrzeugbezug wird wie bisher alles geleert.
+   */
+  function fiGetSpeicherNachSchreibzugriff(opts) {
+    let id = opts?.fiFahrzeug ?? null;
+    if (id == null) {
+      try { const b = opts?.body; if (b && typeof b.get === 'function') id = b.get('vehicle_id'); } catch (e) { /* kein lesbarer Body */ }
+    }
+    if (id == null || id === '') { fiGetSpeicherLeeren(); return; }
+    id = String(id);
+    for (const adresse of [...fiGetSpeicher.keys()]) {
+      let u;
+      try { u = new URL(adresse, location.origin); } catch (e) { fiGetSpeicher.delete(adresse); continue; }
+      const vid = u.searchParams.get('vehicle_id');
+      const betrifft = /\/game\/(dispatch|driver_time_status)\.php$/.test(u.pathname)
+        ? (vid == null || vid === id) // Plan/Fahrerzeit dieses Fahrzeugs (und die Liste ohne Fahrzeug, die das erste mitliefert)
+        : /\/game\/(freight-market|bank|account_statement|inbox)\.php$/.test(u.pathname);
+      if (betrifft) fiGetSpeicher.delete(adresse);
+    }
+  }
+
   async function fiFetch(url, opts) {
     const methode = String(opts?.method ?? 'GET').toUpperCase();
     const adresse = String(url);
     let sameOrigin = true;
     try { sameOrigin = new URL(adresse, location.origin).origin === location.origin; } catch (e) { /* relativ/ungültig: wie same-origin behandeln */ }
 
-    if (methode === 'GET' && sameOrigin) {
+    const ausSpeicher = methode === 'GET' && sameOrigin && !opts?.fiOhneCache; // fiOhneCache: immer frisch lesen, nichts merken
+    if (ausSpeicher) {
       const treffer = fiGetSpeicher.get(adresse);
       if (treffer && Date.now() - treffer.zeit < fiTtlFuer(adresse)) {
         fiAbrufGespart++;
@@ -158,7 +183,7 @@
         return (await treffer.promise).clone();
       }
     } else if (methode !== 'GET' && !opts?.fiLesend) {
-      fiGetSpeicherLeeren(); // echter Schreibzugriff -> danach frische Daten
+      fiGetSpeicherNachSchreibzugriff(opts); // echter Schreibzugriff -> danach frische Daten (nur was betroffen ist)
     }
 
     const t0 = performance.now();
@@ -167,7 +192,7 @@
     if (fiAbrufLog.length > 3000) fiAbrufLog.shift();
 
     const anfrage = window.fetch(url, opts).then(res => { eintrag.status = res.status; return res; });
-    if (methode === 'GET' && sameOrigin) {
+    if (ausSpeicher) {
       fiGetSpeicher.set(adresse, { zeit: Date.now(), promise: anfrage });
       anfrage.then(res => { if (!res.ok) fiGetSpeicher.delete(adresse); }, () => fiGetSpeicher.delete(adresse));
     }
@@ -179,7 +204,7 @@
       throw e;
     } finally {
       eintrag.ms = Math.round(performance.now() - t0);
-      if (methode !== 'GET' && !opts?.fiLesend) fiGetSpeicherLeeren();
+      if (methode !== 'GET' && !opts?.fiLesend) fiGetSpeicherNachSchreibzugriff(opts);
       fiAbrufHoerer.forEach(f => { try { f(); } catch (e) { /* Anzeige darf Abrufe nie stören */ } });
     }
   }
@@ -4148,8 +4173,7 @@
         autofillBtn.textContent = originalText;
         loadBtn.disabled = false;
         reloadBtn.disabled = false;
-        fiGetSpeicherLeeren();
-        await aktualisiereFlotte();
+        await aktualisiereFlotte(); // gebuchte Fahrzeuge sind schon einzeln aus dem Speicher gefallen, der Rest bleibt
       }
     }
 
@@ -5051,7 +5075,7 @@
    * @param {string} jobId
    * @returns {Promise<Object>} Die rohe Server-Antwort (payload)
    */
-  async function nimmFrachtNurAn(jobId) {
+  async function nimmFrachtNurAn(jobId, vehicleId = null) {
     const acceptForm = new FormData();
     acceptForm.append('job_id', String(jobId));
     acceptForm.append('ajax', '1');
@@ -5059,6 +5083,7 @@
     const acceptRes = await fiFetch('/game/accept_freight_job.php', {
       method: 'POST',
       body: acceptForm,
+      fiFahrzeug: vehicleId, // betrifft nur den Pool/Plan dieses Fahrzeugs (siehe fiGetSpeicherNachSchreibzugriff)
       credentials: 'same-origin',
       headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       redirect: 'manual',
@@ -5097,7 +5122,8 @@
   // Fehlschlag vollständig rückgängig machen.
 
   async function holePoolOrderIds(vehicleId) {
-    const res = await fiFetch(`/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}`, { credentials: 'same-origin', cache: 'no-store' });
+    // Pool-Lesung gehört zur Buchung und muss immer frisch sein (fiOhneCache), sonst fehlt die neu angenommene Order
+    const res = await fiFetch(`/game/dispatch.php?vehicle_id=${encodeURIComponent(vehicleId)}`, { credentials: 'same-origin', cache: 'no-store', fiOhneCache: true });
     const doc = safeParseHtml(await res.text());
     return Array.from(doc.querySelectorAll(SELECTORS.ordersPool)).map(c => c.dataset.orderId).filter(Boolean);
   }
@@ -5105,7 +5131,7 @@
   /** Nimmt einen Auftrag an und liefert die neue Order-ID (aus der Antwort oder per Pool-Differenz). */
   async function nimmAnUndHoleOrderId(jobId, vehicleId) {
     const poolVorher = new Set(await holePoolOrderIds(vehicleId));
-    const payload = await nimmFrachtNurAn(jobId);
+    const payload = await nimmFrachtNurAn(jobId, vehicleId);
     let orderId = payload.order_id || payload.dispatch_order_id || payload.id || null;
     if (!orderId) {
       const neu = (await holePoolOrderIds(vehicleId)).filter(id => !poolVorher.has(id));
@@ -5153,7 +5179,7 @@
       reason: 'Rückgabe aus der Disposition',
     });
     const res = await fiFetch('/game/return_dispatch_order_to_market.php', {
-      method: 'POST', body, credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      method: 'POST', body, fiFahrzeug: vehicleId, credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
     const doc = safeParseHtml(await res.text());
     const fehler = doc.querySelector('.flash.error')?.textContent.replace(/\s+/g, ' ').trim();
