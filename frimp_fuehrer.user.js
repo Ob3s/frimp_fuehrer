@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.35.0
+// @version      0.35.1
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.35.0';
+  const SCRIPT_VERSION = '0.35.1';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -997,6 +997,59 @@
     };
   }
 
+  // ----- Bewertungs-Cache: gleiche Rechnung nie zweimal -----
+  // Die Bewertung "Auftrag X für Fahrzeug im Zustand Y" ist eine reine Funktion von Auftrag, Fahrzeugzustand
+  // (Ort, frei ab, Restzeiten) und ein paar Globals (Diesel, Planungsfenster, Puffer). Frachtart-Ansicht, "Alle befüllen"
+  // (jede Runde), die Voraus-Schau und Fahrzeuge im selben Zustand rechnen sonst dasselbe immer wieder. Treffer sind
+  // exakte Kopien; der Cache gilt nur wenige Minuten (die Rechnung hängt an "jetzt": Planungsfenster, Live-Restzeiten).
+  const BEWERTUNGS_CACHE_TTL_MS = 3 * 60 * 1000;
+  const BEWERTUNGS_CACHE_MAX = 250000;
+  let bewertungsCache = new Map(); // Fahrzeugzustand-Signatur -> Map(Auftragsschlüssel -> Bewertung | null)
+  let bewertungsCacheGroesse = 0;
+  let bewertungsEpoche = null;
+  const statusSignaturen = new WeakMap();
+
+  /** Leert den Cache, sobald sich eine Eingangsgröße der Rechnung geändert hat oder er zu alt ist. */
+  function pruefeBewertungsCache() {
+    const epoche = [Math.round(ASSUMPTIONS.dieselPreisProLiter * 1000), Math.round(PLANUNGSFENSTER_STUNDEN * 100), aktuellerPlanungspuffer(), Object.keys(CITY_COORDS).length].join('|');
+    if (!bewertungsEpoche || bewertungsEpoche.epoche !== epoche || Date.now() - bewertungsEpoche.start > BEWERTUNGS_CACHE_TTL_MS || bewertungsCacheGroesse > BEWERTUNGS_CACHE_MAX) {
+      bewertungsCache = new Map();
+      bewertungsCacheGroesse = 0;
+      bewertungsEpoche = { epoche, start: Date.now() };
+    }
+  }
+
+  function fahrzeugZustandSignatur(status, live, typ, stellplaetze, kategorie) {
+    let s = statusSignaturen.get(status);
+    if (s === undefined) {
+      // Nur was die Bewertung wirklich liest: Ort, frei ab, expliziter Restzeit-Zustand - sonst die Phasen (Restzeiten-Rekonstruktion)
+      s = JSON.stringify([
+        status.freiAbOrt, status.freiAbZeit?.getTime() ?? null, status.fahrerRestOverride ?? null,
+        status.fahrerRestOverride ? null : (status.phasen ?? []).filter(p => p.start && p.ende).map(p => [p.type, p.start.getTime(), p.ende.getTime()]),
+      ]);
+      statusSignaturen.set(status, s);
+    }
+    const d = live?.drivers;
+    return `${s}|${d ? d.length : -1}|${d?.[0]?.remaining_drive_seconds ?? ''}|${d?.[0]?.remaining_shift_seconds ?? ''}|${typ ?? ''}|${stellplaetze ?? ''}|${kategorie ?? ''}`;
+  }
+
+  /** bewerteFrachtFuerFahrzeug mit Cache (nur für echte Marktaufträge mit Job-ID). */
+  function bewerteFrachtGemerkt(fracht, status, live, typ, stellplaetze, kategorie) {
+    if (!fracht?.jobId || !status) return bewerteFrachtFuerFahrzeug(fracht, status, live, typ, stellplaetze, kategorie);
+    const sig = fahrzeugZustandSignatur(status, live, typ, stellplaetze, kategorie);
+    let proFahrzeug = bewertungsCache.get(sig);
+    if (!proFahrzeug) { proFahrzeug = new Map(); bewertungsCache.set(sig, proFahrzeug); }
+    const schluessel = `${fracht.jobId}|${fracht.entfernungKm ?? ''}|${fracht.verguetungEuro ?? ''}|${fracht.lieferfrist?.getTime() ?? ''}|${fracht.stellplaetzeBenoetigt ?? ''}`;
+    if (proFahrzeug.has(schluessel)) {
+      const v = proFahrzeug.get(schluessel);
+      return v ? { ...v } : null; // Kopie: Aufrufer ergänzen/ändern Felder (Umweg, Heimfahrt, Score)
+    }
+    const roh = bewerteFrachtFuerFahrzeug(fracht, status, live, typ, stellplaetze, kategorie);
+    proFahrzeug.set(schluessel, roh ? { ...roh } : null);
+    bewertungsCacheGroesse++;
+    return roh;
+  }
+
   /**
    * Baut für jede Route (exakt gleicher Start- und Zielort) Bündel aus mehreren
    * Teilladungen, die zusammen unter die Stellplatzgrenze des Fahrzeugs passen.
@@ -1441,6 +1494,7 @@
     const angeboteFuerDirekt = zielReferenzStadt
       ? filtereNachZielstadt(angebote, zielReferenzStadt, zielRadiusKm)
       : angebote;
+    pruefeBewertungsCache();
 
     return fleet.map(fahrzeugRoh => {
       const fahrzeug = mitUrlaubsRueckkehr(fahrzeugRoh);
@@ -1456,7 +1510,7 @@
       const einzelBewertungen = angeboteFuerDirekt
         .filter(a => a.kapazitaet === 'Komplettladung' && a.jobId && (darfAdr || !a.adr))
         .map(fracht => {
-          const bewertung = bewerteFrachtFuerFahrzeug(fracht, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
+          const bewertung = bewerteFrachtGemerkt(fracht, fahrzeug.status, fahrzeug.live, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (bewertung && direktKm) {
             const gesamtFahrKm = bewertung.anfahrtKm + (fracht.entfernungKm ?? 0);
             bewertung.umwegProzent = Math.round(((gesamtFahrKm / direktKm) - 1) * 100);
@@ -1594,7 +1648,7 @@
 
         let besteFolge = null;
         folgeKandidaten.slice(0, FOLGE_PRUEFEN).forEach(({ f }) => {
-          const bF = bewerteFrachtFuerFahrzeug(f, folgeStatus, frischeLive, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
+          const bF = bewerteFrachtGemerkt(f, folgeStatus, frischeLive, fahrzeug.verbrauchsTyp ?? fahrzeug.typ, fahrzeug.stellplaetze ?? null, fahrzeug.typ);
           if (!bF || bF.schaffbar === false || bF.deckungsbeitragEuro == null) return;
           if (urlaubskonflikt(fahrzeug, f.zielOrt, bF.ankunftZeit, basis.ankunftZeit, bF)) return;
           const paarKm = gesamtKmErster + bF.anfahrtKm + (f.entfernungKm ?? 0);
