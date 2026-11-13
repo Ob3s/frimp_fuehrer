@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.34.0
+// @version      0.34.1
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.34.0';
+  const SCRIPT_VERSION = '0.34.1';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -2543,8 +2543,10 @@
       .fi-ein-tag { display: flex; gap: 10px; align-items: baseline; padding: 7px 0 3px; margin-top: 4px; border-top: 1px solid rgba(255,255,255,.08); color: #ffd98a; }
       .fi-ein-tag:first-child { border-top: 0; margin-top: 0; }
       .fi-ein-tag b { color: #8ef2a8; }
-      .fi-ein-lauf { margin-left: auto; color: #9aa5b8; font-weight: 600; }
-      .fi-ein-zeile { display: grid; grid-template-columns: 44px 48px 1fr auto; gap: 8px; padding: 1px 0; }
+      .fi-ein-start { padding: 3px 0 2px; color: #9aa5b8; }
+      .fi-ein-start b { color: #e8edf7; }
+      .fi-ein-zeile { display: grid; grid-template-columns: 44px 48px 1fr auto 104px; gap: 8px; padding: 1px 0; }
+      .fi-ein-stand { text-align: right; color: #e8edf7; }
       .fi-ein-zeit { color: #9aa5b8; }
       .fi-ein-route { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9aa5b8; }
       .fi-ein-betrag { color: #8ef2a8; text-align: right; }
@@ -4446,13 +4448,17 @@
       e.netto += t.netto; e.brutto += t.brutto; e.zeilen.push(t);
       tage.set(k, e);
     });
+    // Kontostand jetzt (Anzeige oben auf der Seite); darauf werden die Einnahmen der Reihe nach aufaddiert
+    const kontoText = document.querySelector(SELECTORS.kontostandValue)?.textContent;
+    const konto = kontoText ? parseGermanNumber(kontoText) : null;
     let lauf = 0;
-    let html = '';
+    let html = konto != null ? `<div class="fi-ein-start">Kontostand jetzt <b>${eur(konto)}</b></div>` : '';
     tage.forEach((e, k) => {
-      lauf += e.netto;
-      html += `<div class="fi-ein-tag"><span>${h(k)}</span><b>+${eur(e.netto)}</b><span class="fi-ein-lauf">gesamt +${eur(lauf)}</span></div>`;
+      html += `<div class="fi-ein-tag"><span>${h(k)}</span><b>+${eur(e.netto)}</b></div>`;
       e.zeilen.forEach(t => {
-        html += `<div class="fi-ein-zeile"><span class="fi-ein-zeit">${t.ende.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</span><span class="fi-ein-fz">${h(t.fahrzeug)}</span><span class="fi-ein-route">${h(t.von)} → ${h(t.bis)}</span><span class="fi-ein-betrag">+${eur(t.netto)}</span></div>`;
+        lauf += t.netto;
+        const stand = konto != null ? konto + lauf : lauf;
+        html += `<div class="fi-ein-zeile"><span class="fi-ein-zeit">${t.ende.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</span><span class="fi-ein-fz">${h(t.fahrzeug)}</span><span class="fi-ein-route">${h(t.von)} → ${h(t.bis)}</span><span class="fi-ein-betrag">+${eur(t.netto)}</span><span class="fi-ein-stand">${konto != null ? '= ' : 'gesamt +'}${eur(stand)}</span></div>`;
       });
     });
     html += `<div class="fi-ein-fuss">Geschätzt: Strecke × Ø-€/km des Fahrzeugs, abzüglich Ø Diesel und Maut. Gutschrift zum Entladeende, nur bereits eingeplante Touren (brutto ${eur(einnahmen.brutto)}).</div>`;
