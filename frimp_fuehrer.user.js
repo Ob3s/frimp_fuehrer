@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Frimp Führer
 // @namespace    noone.frimpfuehrer
-// @version      0.35.2
+// @version      0.35.3
 // @description  Übersicht über Fuhrpark, Frachtbörse, Kredit & Personal-Wirtschaftlichkeit
 // @author       NoOne
 // @match        https://frachtimperium.de/*
@@ -18,7 +18,7 @@
   // (.githooks/pre-commit) bumpt beide zusammen, damit sie nie auseinanderlaufen.
   // Im Dashboard-Titel sichtbar, damit auf einen Blick erkennbar ist, ob
   // Tampermonkey wirklich die neueste Version geladen hat.
-  const SCRIPT_VERSION = '0.35.2';
+  const SCRIPT_VERSION = '0.35.3';
 
   // ============================================================
   // 1. KONFIGURATION – aus echtem HTML von /game/dispatch.php ermittelt
@@ -4564,7 +4564,7 @@
       tag.summe += e.betrag; tag.zeilen.push(e); if (e.art === 'ein') tag.touren++;
       tage.set(k, tag);
     });
-    summary.textContent = `💶 Einnahmen · +${eur(einnahmen.netto)} netto aus ${liste.length} Tour${liste.length > 1 ? 'en' : ''} bis ${letzte.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' })}${konto != null ? ` · Konto dann ${eur(stand)}` : ''}`;
+    summary.textContent = `💶 +${eur(einnahmen.netto)}${konto != null ? ` auf ${eur(stand)}` : ''}`;
 
     // Geöffnete Tage merken, damit eine Aktualisierung nichts zuklappt
     const offen = new Set([...body.querySelectorAll('details[open]')].map(d => d.dataset.tag));
